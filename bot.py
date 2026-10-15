@@ -89,14 +89,14 @@ CATEGORIES: Dict[str, Dict[str, Any]] = {
 }
 
 CACHE_FILE = "sent_videos.json"
-MAX_CACHED_IDS = 2000  # Kapasitas cache deduplikasi
+MAX_CACHED_IDS = 10000  # Kapasitas cache deduplikasi
 
 
 # ==============================================================================
 # 3. HELPER KELAS PENYIMPANAN RIWAYAT VIDEO (DEDUPLIKASI)
 # ==============================================================================
 class VideoHistoryManager:
-    """Mengelola penyimpanan ID video yang telah dikirim ke Discord."""
+    """Mengelola penyimpanan ID, URL, dan identifikasi unik video yang telah dikirim ke Discord agar tidak pernah terkirim ulang."""
     def __init__(self, filename: str = CACHE_FILE):
         self.filename = filename
         self.seen_ids: Set[str] = set()
@@ -124,11 +124,51 @@ class VideoHistoryManager:
         except Exception as e:
             logger.error(f"Gagal menyimpan riwayat video ke {self.filename}: {e}")
 
-    def is_seen(self, video_id: Any) -> bool:
-        return str(video_id) in self.seen_ids
+    def _get_keys(self, video: Any) -> List[str]:
+        """Mengekstrak seluruh kunci identifikasi (ID, path URL, slug judul) agar tidak pernah dobel."""
+        keys: List[str] = []
+        if isinstance(video, dict):
+            v_id = video.get("id")
+            v_url = video.get("url")
+            v_title = video.get("title")
 
-    def mark_as_seen(self, video_id: Any) -> None:
-        self.seen_ids.add(str(video_id))
+            if v_id and str(v_id).strip():
+                clean_id = str(v_id).strip()
+                keys.append(clean_id)
+                keys.append(f"id:{clean_id}")
+
+            if v_url and str(v_url).strip():
+                clean_url = str(v_url).strip().lower().split("?")[0]
+                keys.append(clean_url)
+                m = re.search(r'/video[._]?([a-zA-Z0-9]+)', clean_url)
+                if m:
+                    keys.append(m.group(1))
+                    keys.append(f"id:{m.group(1)}")
+
+            if v_title and str(v_title).strip():
+                slug = re.sub(r'[^a-zA-Z0-9]', '', str(v_title).lower())
+                if len(slug) >= 8:
+                    keys.append(f"slug:{slug[:40]}")
+        elif isinstance(video, str) and video.strip():
+            clean_str = video.strip()
+            keys.append(clean_str)
+            keys.append(f"id:{clean_str}")
+        return keys
+
+    def is_seen(self, video: Any) -> bool:
+        """Memeriksa apakah video (berdasarkan ID, URL, atau judul) sudah pernah di-drop di server."""
+        if not video:
+            return False
+        keys = self._get_keys(video)
+        return any(k in self.seen_ids for k in keys)
+
+    def mark_as_seen(self, video: Any) -> None:
+        """Menandai video beserta varian identitasnya sebagai sudah dikirim ke Discord."""
+        if not video:
+            return
+        keys = self._get_keys(video)
+        for k in keys:
+            self.seen_ids.add(k)
         self.save_history()
 
 
@@ -768,11 +808,11 @@ class MultiChannelAdultBot(commands.Bot):
                 logger.warning(f"[Auto-Update] [{cat_name}] Tidak ada video ditemukan dari API.")
                 return
 
-            # Filter video baru (deduplikasi ID agar tidak pernah mengirim video yang sama)
+            # Filter video baru (deduplikasi ID, URL, dan slug judul agar tidak pernah mengirim video yang sama)
             new_videos = []
             for raw_item in raw_videos:
                 item_data = normalize_video_data(raw_item, default_category=cat_info["name"])
-                if item_data["id"] and not self.history.is_seen(item_data["id"]):
+                if item_data.get("url") and not self.history.is_seen(item_data):
                     new_videos.append(item_data)
 
             if not new_videos:
@@ -799,7 +839,7 @@ class MultiChannelAdultBot(commands.Bot):
                     else:
                         embed = create_video_embed(video, category_info=cat_info, is_search=False)
                         await channel.send(embed=embed, view=view)
-                    self.history.mark_as_seen(video["id"])
+                    self.history.mark_as_seen(video)
                     logger.info(f"[Auto-Update] [{cat_name}] Berhasil posting video: {video['title'][:40]} (ID: {video['id']})")
                     await asyncio.sleep(2)  # Delay rate limit Discord
                 except discord.Forbidden:
@@ -1020,85 +1060,90 @@ async def cari_video(
             except Exception as fb_err:
                 logger.error(f"Fallback search API gagal: {fb_err}")
 
-        if not raw_results:
-            not_found_desc = f"Tidak ditemukan video dengan kata kunci: **{combined_kw}**."
-            if detected_code:
-                not_found_desc = (
-                    f"Tidak ditemukan video dengan Kode Nuklir: **`{detected_code}`**.\n"
-                    "Pastikan kode produksi JAV sudah benar (contoh: `SSIS-878`, `ALDN-056`, `FC2-PPV-1234567`)."
-                )
-            elif dur_val and dur_val in DURATION_LABELS:
-                not_found_desc += f"\nFilter Durasi aktif: `{DURATION_LABELS[dur_val]}`. Coba ganti ke durasi lain."
+        # 1. Filter video yang belum pernah di-drop di server
+        fresh_results = [item for item in raw_results if not bot.history.is_seen(item)]
+
+        # Jika fresh_results kurang dari 3 dan bukan pencarian kode nuklir spesifik, ambil halaman tambahan (p=1)
+        if len(fresh_results) < 3 and not detected_code:
+            try:
+                p1_params = dict(xv_params)
+                p1_params["p"] = "1"
+                async with bot.session.get("https://www.xvideos.com/", params=p1_params, proxy=bot.proxy, timeout=aiohttp.ClientTimeout(total=8)) as p1_resp:
+                    if p1_resp.status == 200:
+                        p1_items = parse_xvideos_html(await p1_resp.text(), default_category=current_category["name"] if current_category else None)
+                        for it in p1_items:
+                            if not bot.history.is_seen(it) and it not in fresh_results:
+                                fresh_results.append(it)
+            except Exception as p1_err:
+                logger.info(f"Pencarian XVideos p=1 gagal/timeout: {p1_err}")
+
+        # Tentukan kandidat video yang akan dikirim (prioritaskan video segar yang belum pernah di-drop)
+        if fresh_results:
+            candidates = fresh_results[:3]
+        elif detected_code:
+            # Khusus pencarian kode nuklir yang spesifik, izinkan hasil pencarian meski pernah di-drop jika tidak ada varian lain
+            candidates = raw_results[:3]
+        else:
+            candidates = []
+
+        if not candidates:
+            not_found_desc = f"Semua video dengan kata kunci **{combined_kw}** sudah pernah di-drop di server ini."
+            if dur_val and dur_val in DURATION_LABELS:
+                not_found_desc += f"\nFilter Durasi aktif: `{DURATION_LABELS[dur_val]}`. Coba ganti ke durasi atau kata kunci lain."
 
             not_found_embed = discord.Embed(
-                title="🔍 Hasil Pencarian Tidak Ditemukan",
+                title="🔍 Tidak Ada Video Baru",
                 description=not_found_desc,
                 color=discord.Color.dark_gray()
             )
             await ctx.send(embed=not_found_embed)
             return
 
-        # Normalisasi hasil teratas (Top Result)
-        top_video = normalize_video_data(raw_results[0], default_category=current_category["name"] if current_category else None)
-        direct_mp4 = await extract_direct_mp4_url(bot.session, top_video["url"], proxy=bot.proxy)
-        view = VideoActionView(top_video["url"])
+        # Normalisasi kandidat video
+        normalized_candidates = [
+            normalize_video_data(it, default_category=current_category["name"] if current_category else None)
+            for it in candidates
+        ]
 
-        # Siapkan daftar video serupa lainnya jika ada
-        additional_links = []
-        for idx, extra_item in enumerate(raw_results[1:4], start=2):
-            extra_data = normalize_video_data(extra_item)
-            if extra_data.get("url"):
-                additional_links.append(f"**{idx}.** [{extra_data['title'][:40]}]({extra_data['url']}) (`{extra_data['duration']}`)")
+        # Ekstraksi Direct MP4 stream secara paralel untuk semua video kandidat
+        mp4_urls = await asyncio.gather(
+            *(extract_direct_mp4_url(bot.session, v["url"], proxy=bot.proxy) for v in normalized_candidates)
+        )
 
-        if direct_mp4:
-            # Kirim sebagai Native Inline Video Player (Langsung bisa diputar di Discord)
-            if detected_code and (exact_code_matches or detected_code.upper() in top_video["title"].upper()):
-                lines = [f"🔞 **[KODE NUKLIR: {detected_code}]** {top_video['title']}"]
+        # Kirim SEMUA video langsung sebagai Player Video (Inline Playable Video)
+        for idx, (video, direct_mp4) in enumerate(zip(normalized_candidates, mp4_urls)):
+            is_exact_code = bool(detected_code and (exact_code_matches or detected_code.upper() in video["title"].upper()))
+            header_badge = f"🎬 **[KODE NUKLIR: {detected_code}]** " if is_exact_code else ""
+
+            lines = [
+                f"🔞 {header_badge}**{video['title']}**",
+                f"⏱️ `{video.get('duration', 'N/A')}` • 🌐 `{current_category['name'] if current_category else 'Bebas'}`"
+            ]
+
+            if idx == 0:
+                if detected_code:
+                    match_note = " *(Judul Cocok Persis)*" if exact_code_matches else ""
+                    lines.append(f"🏷️ **Kode Nuklir:** `{detected_code}`{match_note}")
+                elif en_query != combined_kw.lower():
+                    lines.append(f"🔍 **Kata Kunci:** `{combined_kw}` (Tag: `{en_query}`)")
+                if dur_val and dur_val in DURATION_LABELS:
+                    lines.append(f"⏳ **Filter Durasi:** `{DURATION_LABELS[dur_val]}`")
+
+            view = VideoActionView(video["url"])
+
+            if direct_mp4:
+                lines.append(direct_mp4)
+                await ctx.send(content="\n".join(lines), view=view)
             else:
-                lines = [f"🔞 **{top_video['title']}**"]
+                embed = create_video_embed(video, category_info=current_category, is_search=True)
+                await ctx.send(embed=embed, view=view)
 
-            lines.append(f"⏱️ `{top_video.get('duration', 'N/A')}` • 🌐 `{current_category['name'] if current_category else 'Bebas'}`")
+            # Tandai video ini sebagai sudah pernah di-drop di server agar tidak pernah di-upload ulang
+            bot.history.mark_as_seen(video)
 
-            if detected_code:
-                match_note = " *(Judul Cocok Persis)*" if exact_code_matches else ""
-                lines.append(f"🏷️ **Kode Nuklir:** `{detected_code}`{match_note}")
-
-            if dur_val and dur_val in DURATION_LABELS:
-                lines.append(f"⏳ **Filter Durasi:** `{DURATION_LABELS[dur_val]}`")
-
-            if not detected_code and en_query != combined_kw.lower():
-                lines.append(f"🔍 **Kata Kunci:** `{combined_kw}` (Tag: `{en_query}`)")
-
-            lines.append(direct_mp4)
-
-            if additional_links:
-                lines.append("\n📚 **Video Serupa Lainnya:**\n" + "\n".join(additional_links))
-
-            await ctx.send(content="\n".join(lines), view=view)
-        else:
-            # Fallback ke format embed jika direct mp4 tidak tersedia
-            embed = create_video_embed(top_video, category_info=current_category, is_search=True)
-            if detected_code:
-                embed.add_field(
-                    name="🏷️ Kode Nuklir JAV",
-                    value=f"`{detected_code}`" + (" *(Judul Cocok Persis)*" if exact_code_matches else ""),
-                    inline=True
-                )
-            if dur_val and dur_val in DURATION_LABELS:
-                embed.add_field(name="⏳ Filter Durasi", value=DURATION_LABELS[dur_val], inline=True)
-            if not detected_code and en_query != combined_kw.lower():
-                embed.add_field(
-                    name="🔍 Kata Kunci Pencarian",
-                    value=f"• Asli: `{combined_kw}`\n• Terjemahan Tag: `{en_query}`",
-                    inline=False
-                )
-            if additional_links:
-                embed.add_field(
-                    name="📚 Video Serupa Lainnya",
-                    value="\n".join(additional_links),
-                    inline=False
-                )
-            await ctx.send(embed=embed, view=view)
+            # Jeda waktu singkat jika mengirim beberapa video agar Discord merender player secara teratur
+            if idx < len(normalized_candidates) - 1:
+                await asyncio.sleep(1)
 
     except asyncio.TimeoutError:
         await ctx.send("⏱️ Permintaan ke API melebihi batas waktu (Timeout). Silakan periksa koneksi internet.")
