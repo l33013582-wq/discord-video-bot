@@ -86,8 +86,8 @@ python bot.py
 
 | Perintah | Contoh | Keterangan |
 | :--- | :--- | :--- |
-| `/cari [keyword] [kategori]` | `/cari keyword: tante perawat` | Mencari video sesuai kata kunci dalam **Bahasa Indonesia** atau Inggris (hanya di channel NSFW). Otomatis diterjemahkan ke tag XVideos. |
-| `/cari [keyword] [kategori]` | `/cari keyword: cosplay kategori: Jepang (JAV)` | Mencari dengan filter kategori spesifik via opsi dropdown (Jepang, Asia, Barat, Semua). |
+| `/cari [kata_kunci]` | `/cari keyword: perawat` | Cukup ketik kata kunci di channel masing-masing. Genre video otomatis mengikuti channel (`#jav` = Jepang, `#asia` = Asia, `#western` = Barat). |
+| `/cari [kata_kunci]` | `/cari keyword: anak sekolah` | Mendukung bahasa Indonesia (tante, perawat, sekolah, dll) dan otomatis diterjemahkan ke tag XVideos. |
 | `/status` | `/status` | Menampilkan ringkasan status koneksi ke channel Jepang, Asia, dan Western. |
-| `/search` / `/find` | `/search keyword: blonde` | Alias dari perintah `/cari`. |
-| `!cari` / `!status` | `!cari tante jepang` | Tetap didukung sebagai fallback jika Anda lebih suka tanda seru. |
+| `/search` / `/find` | `/search keyword: cosplay` | Alias dari perintah `/cari`. |
+| `!cari` / `!status` | `!cari perawat` | Tetap didukung sebagai fallback jika Anda lebih suka tanda seru. |

@@ -672,35 +672,19 @@ bot = MultiChannelAdultBot()
 
 
 # ==============================================================================
-# 6. PERINTAH INTERAKTIF PENCARIAN (/cari [kata_kunci])
 # ==============================================================================
-# ==============================================================================
-# 7. PERINTAH INTERAKTIF PENCARIAN (/cari [kata_kunci] [kategori])
+# 7. PERINTAH INTERAKTIF PENCARIAN (/cari [kata_kunci])
 # ==============================================================================
 @bot.hybrid_command(
     name="cari",
     aliases=["search", "find"],
-    description="Mencari video dewasa berdasarkan kata kunci (Wajib di channel NSFW)"
+    description="Cari video sesuai genre channel ini (contoh: /cari perawat)"
 )
 @discord.app_commands.describe(
-    keyword="Kata kunci video dalam Bahasa Indonesia atau Inggris (contoh: tante, perawat, cosplay, siswi)",
-    kategori="Pilihan kategori wilayah video (Jepang, Asia, Barat, atau Semua Kategori)"
+    keyword="Apa yang ingin dicari (contoh: perawat, tante, anak sekolah, cosplay)"
 )
-@discord.app_commands.choices(
-    kategori=[
-        discord.app_commands.Choice(name="🇯🇵 Jepang (JAV)", value="jepang"),
-        discord.app_commands.Choice(name="🌏 Asia (Non-Jepang)", value="asia"),
-        discord.app_commands.Choice(name="🌍 Barat (Western / Bule)", value="western"),
-        discord.app_commands.Choice(name="🌐 Bebas / Semua Kategori", value="semua"),
-    ]
-)
-async def cari_video(
-    ctx: commands.Context,
-    kategori: Optional[discord.app_commands.Choice[str]] = None,
-    *,
-    keyword: Optional[str] = None
-) -> None:
-    """Perintah pencarian video. Menyesuaikan kategori otomatis jika dijalankan di channel spesifik atau melalui pilihan kategori."""
+async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) -> None:
+    """Perintah pencarian video. Otomatis menyesuaikan genre dengan channel tempat perintah diketik."""
     # 1. Panggil defer() segera di baris pertama agar Discord interaksi tidak pernah timeout 3 detik
     await ctx.defer()
 
@@ -721,20 +705,29 @@ async def cari_video(
         await ctx.send(embed=warning_embed)
         return
 
+    # Deteksi kategori otomatis dari channel tempat perintah dijalankan
+    channel_name = getattr(ctx.channel, "name", "channel")
+    current_category = None
+    for cat_key, cat_data in CATEGORIES.items():
+        if cat_data["channel_id"] == ctx.channel.id:
+            current_category = cat_data
+            break
+
     # 3. Validasi Kata Kunci
     if not keyword or not keyword.strip():
         help_embed = discord.Embed(
             title="ℹ️ Cara Menggunakan Perintah /cari",
             description=(
-                "Ketik kata kunci video yang ingin Anda cari. Anda dapat menggunakan **Bahasa Indonesia** maupun **Bahasa Inggris**!\n\n"
-                "**Format:** `/cari keyword: [kata_kunci] [kategori (opsional)]`\n\n"
-                "**Contoh Penggunaan Bahasa Indonesia:**\n"
-                "• `/cari keyword: tante perawat`\n"
-                "• `/cari keyword: cosplay kategori: Jepang (JAV)`\n"
-                "• `/cari keyword: anak sekolah selingkuh`\n"
-                "• `/cari keyword: bule toket besar`\n"
-                "• `/cari keyword: jilbab indo`\n\n"
-                "💡 *Tips: Kategori otomatis mendeteksi channel Anda (#jav = Jepang, #asia = Asia, #western = Barat) atau dari opsi dropdown kategori.*"
+                f"Ketik apa yang ingin Anda cari langsung di channel ini.\n"
+                f"Hasil pencarian otomatis disesuaikan dengan genre channel **#{channel_name}**!\n\n"
+                "**Format:** `/cari [kata_kunci]`\n\n"
+                "**Contoh:**\n"
+                "• `/cari perawat`\n"
+                "• `/cari tante`\n"
+                "• `/cari anak sekolah`\n"
+                "• `/cari cosplay`\n"
+                "• `/cari pijat`\n\n"
+                f"💡 *Genre Channel Saat Ini:* **{current_category['name'] if current_category else 'Bebas / Umum'}**"
             ),
             color=discord.Color.gold()
         )
@@ -743,40 +736,20 @@ async def cari_video(
 
     keyword = keyword.strip()
 
-    # Ekstraksi pilihan kategori dari opsi command dropdown
-    chosen_cat_key = None
-    if kategori:
-        chosen_cat_key = kategori.value if isinstance(kategori, discord.app_commands.Choice) else str(kategori).lower()
-        if chosen_cat_key == "semua":
-            chosen_cat_key = None
-
-    # Cek kategori dari channel tempat command dijalankan
-    channel_cat_key = None
-    for cat_key, cat_data in CATEGORIES.items():
-        if cat_data["channel_id"] == ctx.channel.id:
-            channel_cat_key = cat_key
-            break
-
-    # Prioritas penentuan kategori:
-    # 1. Pilihan dropdown kategori (jika user memilih)
-    # 2. Channel tempat command dijalankan (#jav -> Jepang, #asia -> Asia, #western -> Barat)
-    # 3. Deteksi otomatis dari kata kunci bahasa Indonesia (jepang, barat, bule, asia, indo, dll)
-    detected_cat_key = chosen_cat_key or channel_cat_key
-    kw_lower = keyword.lower()
-    if not detected_cat_key:
+    # Jika dijalankan di channel umum (bukan Jepang/Asia/Western), coba deteksi dari kata kunci
+    if not current_category:
+        kw_lower = keyword.lower()
         if any(w in kw_lower for w in ["jepang", "jav"]):
-            detected_cat_key = "jepang"
+            current_category = CATEGORIES["jepang"]
         elif any(w in kw_lower for w in ["barat", "bule", "western"]):
-            detected_cat_key = "western"
+            current_category = CATEGORIES["western"]
         elif any(w in kw_lower for w in ["asia", "indo", "korea", "cina", "china"]):
-            detected_cat_key = "asia"
-
-    current_category = CATEGORIES.get(detected_cat_key) if detected_cat_key else None
+            current_category = CATEGORIES["asia"]
 
     # Terjemahkan kata kunci Bahasa Indonesia ke istilah tag bahasa Inggris
     en_query = translate_indonesian_query(keyword)
 
-    # Bentuk final search query untuk XVideos
+    # Bentuk final search query untuk XVideos sesuai genre channel
     if current_category:
         cat_prefix = current_category["keywords"][0]
         if cat_prefix not in en_query:
@@ -786,7 +759,7 @@ async def cari_video(
     else:
         query_str = en_query
 
-    logger.info(f"User {ctx.author} mencari '{keyword}' (Tag: '{en_query}', Final: '{query_str}') di #{ctx.channel.name} (Kategori: {current_category['name'] if current_category else 'Bebas'})")
+    logger.info(f"User {ctx.author} mencari '{keyword}' (Tag: '{en_query}', Final: '{query_str}') di #{channel_name} (Genre Channel: {current_category['name'] if current_category else 'Bebas'})")
 
     try:
         # 1. Prioritas Pertama: Cari langsung ke XVideos
