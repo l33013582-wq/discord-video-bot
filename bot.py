@@ -320,6 +320,32 @@ def parse_xvideos_html(html_text: str, default_category: Optional[str] = None) -
             continue
 
     return results
+
+
+async def extract_direct_mp4_url(session: aiohttp.ClientSession, video_page_url: str, proxy: Optional[str] = None) -> Optional[str]:
+    """Mengekstrak direct URL video .mp4 dari halaman XVideos agar Discord merender player video langsung (inline playable video)."""
+    if not video_page_url or not video_page_url.startswith("http"):
+        return None
+    try:
+        async with session.get(video_page_url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+            if resp.status == 200:
+                html_text = await resp.text()
+                # 1. Prioritaskan Video High Quality (720p / 480p / 360p)
+                match = re.search(r"html5player\.setVideoUrlHigh\('([^']+)'\)", html_text)
+                if not match:
+                    match = re.search(r"html5player\.setVideoUrlLow\('([^']+)'\)", html_text)
+                if match:
+                    return match.group(1)
+
+                # 2. Fallback: cari URL .mp4 di script player
+                mp4_matches = re.findall(r"https?://[^\s\"']+\.mp4[^\s\"']*", html_text)
+                if mp4_matches:
+                    return mp4_matches[0]
+    except Exception as e:
+        logger.warning(f"Gagal mengekstrak direct mp4 dari {video_page_url}: {e}")
+    return None
+
+
 def normalize_video_data(raw_item: Dict[str, Any], default_category: Optional[str] = None) -> Dict[str, Any]:
     """Menormalisasi data respons JSON API (mendukung Eporner, Redtube, dan format generik)."""
     # Jika format Redtube, data dibungkus di dalam key 'video'
@@ -642,10 +668,19 @@ class MultiChannelAdultBot(commands.Bot):
             videos_to_send = list(reversed(new_videos))[-3:]
 
             for video in videos_to_send:
-                embed = create_video_embed(video, category_info=cat_info, is_search=False)
+                direct_mp4 = await extract_direct_mp4_url(self.session, video["url"], proxy=self.proxy)
                 view = VideoActionView(video["url"])
                 try:
-                    await channel.send(embed=embed, view=view)
+                    if direct_mp4:
+                        content = (
+                            f"🔞 **{video['title']}**\n"
+                            f"⏱️ `{video.get('duration', 'N/A')}` • 🌐 `{cat_name}`\n"
+                            f"{direct_mp4}"
+                        )
+                        await channel.send(content=content, view=view)
+                    else:
+                        embed = create_video_embed(video, category_info=cat_info, is_search=False)
+                        await channel.send(embed=embed, view=view)
                     self.history.mark_as_seen(video["id"])
                     logger.info(f"[Auto-Update] [{cat_name}] Berhasil posting video: {video['title'][:40]} (ID: {video['id']})")
                     await asyncio.sleep(2)  # Delay rate limit Discord
@@ -803,32 +838,47 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
 
         # Normalisasi hasil teratas (Top Result)
         top_video = normalize_video_data(raw_results[0], default_category=current_category["name"] if current_category else None)
-        embed = create_video_embed(top_video, category_info=current_category, is_search=True)
+        direct_mp4 = await extract_direct_mp4_url(bot.session, top_video["url"], proxy=bot.proxy)
         view = VideoActionView(top_video["url"])
 
-        # Tambahkan informasi kata kunci pencarian jika diterjemahkan
-        if en_query != keyword.lower():
-            embed.add_field(
-                name="🔍 Kata Kunci Pencarian",
-                value=f"• Asli: `{keyword}`\n• Terjemahan Tag: `{en_query}`",
-                inline=False
-            )
-
-        # Jika ada video tambahan lainnya, cantumkan di embed
+        # Siapkan daftar video serupa lainnya jika ada
         additional_links = []
         for idx, extra_item in enumerate(raw_results[1:4], start=2):
             extra_data = normalize_video_data(extra_item)
             if extra_data.get("url"):
                 additional_links.append(f"**{idx}.** [{extra_data['title'][:40]}]({extra_data['url']}) (`{extra_data['duration']}`)")
 
-        if additional_links:
-            embed.add_field(
-                name="📚 Video Serupa Lainnya",
-                value="\n".join(additional_links),
-                inline=False
-            )
+        if direct_mp4:
+            # Kirim sebagai Native Inline Video Player (Langsung bisa diputar di Discord)
+            lines = [
+                f"🔞 **{top_video['title']}**",
+                f"⏱️ `{top_video.get('duration', 'N/A')}` • 🌐 `{current_category['name'] if current_category else 'Bebas'}`"
+            ]
+            if en_query != keyword.lower():
+                lines.append(f"🔍 Kata Kunci: `{keyword}` (Tag: `{en_query}`)")
 
-        await ctx.send(embed=embed, view=view)
+            lines.append(direct_mp4)
+
+            if additional_links:
+                lines.append("\n📚 **Video Serupa Lainnya:**\n" + "\n".join(additional_links))
+
+            await ctx.send(content="\n".join(lines), view=view)
+        else:
+            # Fallback ke format embed jika direct mp4 tidak tersedia
+            embed = create_video_embed(top_video, category_info=current_category, is_search=True)
+            if en_query != keyword.lower():
+                embed.add_field(
+                    name="🔍 Kata Kunci Pencarian",
+                    value=f"• Asli: `{keyword}`\n• Terjemahan Tag: `{en_query}`",
+                    inline=False
+                )
+            if additional_links:
+                embed.add_field(
+                    name="📚 Video Serupa Lainnya",
+                    value="\n".join(additional_links),
+                    inline=False
+                )
+            await ctx.send(embed=embed, view=view)
 
     except asyncio.TimeoutError:
         await ctx.send("⏱️ Permintaan ke API melebihi batas waktu (Timeout). Silakan periksa koneksi internet.")
