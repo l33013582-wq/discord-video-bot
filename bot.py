@@ -9,6 +9,7 @@ import aiohttp
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
 
 # ==============================================================================
 # 1. KONFIGURASI LOGGING & ENVIRONMENT VARIABLES
@@ -46,7 +47,7 @@ CATEGORIES: Dict[str, Dict[str, Any]] = {
         "name": "Jepang (JAV / Japanese)",
         "emoji": "🇯🇵",
         "channel_id": parse_channel_id("CHANNEL_JEPANG_ID"),
-        "api_url": os.getenv("API_JEPANG_URL", "https://www.eporner.com/api/v2/web/search/?query=japanese&per_page=10&order=latest&thumbsize=big&format=json"),
+        "api_url": os.getenv("API_JEPANG_URL", "https://www.xvideos.com/?k=japanese"),
         "color": discord.Color.from_rgb(255, 75, 145),  # Sakura Crimson
         "keywords": ["japanese", "jav", "japan"]
     },
@@ -55,7 +56,7 @@ CATEGORIES: Dict[str, Dict[str, Any]] = {
         "name": "Asia (Non-Jepang)",
         "emoji": "🌏",
         "channel_id": parse_channel_id("CHANNEL_ASIA_ID"),
-        "api_url": os.getenv("API_ASIA_URL", "https://www.eporner.com/api/v2/web/search/?query=asian&per_page=10&order=latest&thumbsize=big&format=json"),
+        "api_url": os.getenv("API_ASIA_URL", "https://www.xvideos.com/?k=asian"),
         "color": discord.Color.from_rgb(255, 140, 0),   # Warm Amber
         "keywords": ["asian", "korean", "chinese", "indonesian"]
     },
@@ -64,7 +65,7 @@ CATEGORIES: Dict[str, Dict[str, Any]] = {
         "name": "Western (Barat / Caucasian)",
         "emoji": "🌍",
         "channel_id": parse_channel_id("CHANNEL_WESTERN_ID"),
-        "api_url": os.getenv("API_WESTERN_URL", "https://www.eporner.com/api/v2/web/search/?query=western&per_page=10&order=latest&thumbsize=big&format=json"),
+        "api_url": os.getenv("API_WESTERN_URL", "https://www.xvideos.com/?k=western"),
         "color": discord.Color.from_rgb(30, 144, 255),  # Dodger Blue
         "keywords": ["western", "american", "european", "caucasian"]
     }
@@ -115,8 +116,62 @@ class VideoHistoryManager:
 
 
 # ==============================================================================
-# 4. HELPER PARSER DATA API & PEMBUAT DISCORD EMBED
+# 4. HELPER PARSER DATA API & HTML SCRAPER (XVIDEOS / EPORNER / REDTUBE)
 # ==============================================================================
+def parse_xvideos_html(html_text: str, default_category: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Mengekstrak daftar video langsung dari halaman pencarian atau kategori XVideos."""
+    soup = BeautifulSoup(html_text, "html.parser")
+    results = []
+
+    # XVideos menggunakan class thumb-block untuk setiap video card
+    blocks = soup.find_all("div", class_="thumb-block")
+    for block in blocks:
+        try:
+            # Dapatkan ID video
+            video_id = block.get("id", "").replace("video_", "").strip()
+            if not video_id:
+                data_id = block.get("data-id")
+                video_id = str(data_id) if data_id else None
+
+            # Dapatkan elemen judul dan link video
+            title_p = block.find("p", class_="title")
+            if not title_p:
+                continue
+            a_tag = title_p.find("a")
+            if not a_tag:
+                continue
+
+            title = a_tag.get("title") or a_tag.text.strip()
+            href = a_tag.get("href", "")
+            if not href:
+                continue
+            url = f"https://www.xvideos.com{href}" if href.startswith("/") else href
+
+            # Dapatkan poster gambar / thumbnail
+            img_tag = block.find("img")
+            thumbnail = None
+            if img_tag:
+                thumbnail = img_tag.get("data-src") or img_tag.get("data-thumb") or img_tag.get("src")
+
+            # Dapatkan durasi video
+            duration_span = block.find("span", class_="duration")
+            duration = duration_span.text.strip() if duration_span else "N/A"
+
+            results.append({
+                "id": str(video_id) if video_id else url,
+                "title": str(title),
+                "url": str(url),
+                "thumbnail": str(thumbnail) if thumbnail else None,
+                "duration": str(duration),
+                "tags": default_category or "XVideos",
+                "rate": None,
+                "views": None,
+                "category": default_category
+            })
+        except Exception:
+            continue
+
+    return results
 def normalize_video_data(raw_item: Dict[str, Any], default_category: Optional[str] = None) -> Dict[str, Any]:
     """Menormalisasi data respons JSON API (mendukung Eporner, Redtube, dan format generik)."""
     # Jika format Redtube, data dibungkus di dalam key 'video'
@@ -348,16 +403,28 @@ class MultiChannelAdultBot(commands.Bot):
         logger.info("[Auto-Update] Siklus auto-update 3 channel selesai.")
         logger.info("=" * 60)
 
-    async def _fetch_videos_with_fallback(self, primary_url: str, fallback_query: str) -> List[Dict[str, Any]]:
-        """Mengambil data video dengan fallback otomatis ke Redtube API jika primary API terblokir/gagal."""
+    async def _fetch_videos_with_fallback(self, primary_url: str, fallback_query: str, default_category: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Mengambil data video dengan fallback otomatis (Mendukung XVideos Scraper, Redtube API, dan Eporner API)."""
         urls_to_try = [
             primary_url,
+            f"https://www.xvideos.com/?k={fallback_query}",
             f"https://api.redtube.com/?data=redtube.Videos.searchVideos&output=json&search={fallback_query}"
         ]
 
         for target_url in urls_to_try:
             try:
-                async with self.session.get(target_url, proxy=self.proxy, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                # 1. Jika URL adalah XVideos, ambil halaman HTML dan parse dengan BeautifulSoup
+                if "xvideos.com" in target_url:
+                    async with self.session.get(target_url, proxy=self.proxy, timeout=aiohttp.ClientTimeout(total=12)) as response:
+                        if response.status == 200:
+                            html_text = await response.text()
+                            xv_videos = parse_xvideos_html(html_text, default_category=default_category)
+                            if xv_videos:
+                                return xv_videos
+                    continue
+
+                # 2. Jika API JSON biasa (Redtube / Eporner)
+                async with self.session.get(target_url, proxy=self.proxy, timeout=aiohttp.ClientTimeout(total=12)) as response:
                     if response.status != 200:
                         continue
                     try:
@@ -405,7 +472,7 @@ class VideoActionView(discord.ui.View):
         api_url = cat_info["api_url"]
 
         try:
-            raw_videos = await self._fetch_videos_with_fallback(api_url, cat_query)
+            raw_videos = await self._fetch_videos_with_fallback(api_url, cat_query, default_category=cat_name)
             if not raw_videos:
                 logger.warning(f"[Auto-Update] [{cat_name}] Tidak ada video ditemukan dari API.")
                 return
@@ -517,32 +584,20 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
         # Sesuaikan query pencarian jika dijalankan di channel spesifik
         query_str = f"{current_category['keywords'][0]} {keyword}" if current_category else keyword
 
-        # 1. Coba cari di Primary API (Eporner)
-        search_endpoint = API_SEARCH_VIDEOS_URL.split("?")[0]
-        params = {
-            "query": query_str,
-            "per_page": 5,
-            "thumbsize": "big",
-            "format": "json"
-        }
-
+        # 1. Prioritas Pertama: Cari langsung ke XVideos
         raw_results = []
         try:
-            async with bot.session.get(search_endpoint, params=params, proxy=bot.proxy, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status == 200:
-                    try:
-                        search_payload = await resp.json(content_type=None)
-                    except Exception:
-                        search_payload = json.loads(await resp.text())
-                    
-                    if isinstance(search_payload, list):
-                        raw_results = search_payload
-                    elif isinstance(search_payload, dict):
-                        raw_results = search_payload.get("videos") or search_payload.get("data") or search_payload.get("items") or []
-        except Exception as e:
-            logger.info(f"Primary search API gagal/timeout, mencoba fallback: {e}")
+            xv_search_url = f"https://www.xvideos.com/?k={query_str}"
+            async with bot.session.get(xv_search_url, proxy=bot.proxy, timeout=aiohttp.ClientTimeout(total=8)) as xv_resp:
+                if xv_resp.status == 200:
+                    xv_html = await xv_resp.text()
+                    xv_results = parse_xvideos_html(xv_html, default_category=current_category["name"] if current_category else None)
+                    if xv_results:
+                        raw_results = xv_results
+        except Exception as xv_err:
+            logger.info(f"Pencarian XVideos gagal/timeout: {xv_err}")
 
-        # 2. Jika Primary API tidak menghasilkan data, gunakan Fallback API (Redtube API)
+        # 2. Jika XVideos kosong, gunakan Redtube API sebagai cadangan
         if not raw_results:
             try:
                 fallback_url = "https://api.redtube.com/"
