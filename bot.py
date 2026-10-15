@@ -929,7 +929,315 @@ async def status_channel(ctx: commands.Context) -> None:
 
 
 # ==============================================================================
-# 8. GLOBAL ERROR HANDLER & ENTRYPOINT
+# 8. SISTEM PUSAT PANDUAN INTERAKTIF (/help /panduan)
+# ==============================================================================
+def build_help_home_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🔞 Pusat Panduan Sugiono Bot",
+        description=(
+            "**Prefix:** `/` atau `!` (Dukung juga **Slash Command `/`**)\n"
+            "────────────────────────────────────────"
+        ),
+        color=discord.Color.from_rgb(255, 75, 145),
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    embed.add_field(
+        name="🎣 Perintah Dasar Cepat:",
+        value=(
+            "• `/cari [kata_kunci]` — Cari video instan sesuai genre di channel aktif *(Bisa Diputar Langsung)*\n"
+            "• `/status` — Cek status koneksi 3 channel kategori & verifikasi status NSFW\n"
+            "• `/help` — Menampilkan pusat panduan interaktif ini"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="📺 3 Saluran Video (Auto-Update Setiap 30 Menit):",
+        value=(
+            "• 🇯🇵 **Channel Jepang (`#jav`)** — Feed otomatis video JAV / Japanese terbaru\n"
+            "• 🌏 **Channel Asia (`#asia`)** — Feed otomatis video Asia Non-Jepang *(Korea, Indo, China, Thai)*\n"
+            "• 🌍 **Channel Western (`#western`)** — Feed otomatis video Western / Barat / Caucasian"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🇮🇩 Contoh Pencarian Bahasa Indonesia Cepat:",
+        value=(
+            "• `/cari perawat` — Dicari sesuai genre channel tempat Anda berada\n"
+            "• `/cari tante` — Diterjemahkan ke tag `milf` *(mature)*\n"
+            "• `/cari anak sekolah` — Diterjemahkan ke tag `schoolgirl`\n"
+            "• `/cari cosplay` — Mencari video cosplay di channel aktif\n"
+            "• `/cari jilbab indo` — Diterjemahkan ke `hijab indonesian`\n"
+            "• `/cari bule pirang` — Diterjemahkan ke `western blonde`"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="✨ Keunggulan Sugiono Bot:",
+        value=(
+            "• 🎬 **Native Video Player** — Video langsung diputar di Discord (ada tombol Play)\n"
+            "• ⚡ **Zero-Timeout** — Respon interaksi instan < 0.1 detik, tanpa timeout\n"
+            "• 🔞 **Age-Restricted Safe** — Wajib channel NSFW sesuai ketentuan Discord"
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text="Sugiono Bot • Multi-Channel Adult Video Engine | Auto-Update: Tiap 30 Menit")
+    return embed
+
+
+def build_help_perintah_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🔍 Panduan Perintah & Cara Mencari Video",
+        description=(
+            "Sugiono Bot dirancang agar Anda **tidak perlu repot memilih kategori**.\n"
+            "Cukup buka channel yang sesuai lalu ketik `/cari`!\n"
+            "────────────────────────────────────────"
+        ),
+        color=discord.Color.gold(),
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    embed.add_field(
+        name="📌 1. Perintah `/cari [kata_kunci]`",
+        value=(
+            "Mencari video dewasa secara instan.\n"
+            "• **Di channel `#jav`:** `/cari perawat` $\\rightarrow$ Mencari JAV Jepang bertema perawat.\n"
+            "• **Di channel `#asia`:** `/cari perawat` $\\rightarrow$ Mencari video Asia bertema perawat.\n"
+            "• **Di channel `#western`:** `/cari perawat` $\\rightarrow$ Mencari video Barat bertema perawat.\n\n"
+            "👉 *Hasil pencarian akan langsung muncul sebagai Video Player dengan tombol Play di tengah!*"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="📊 2. Perintah `/status`",
+        value=(
+            "Menampilkan status ketiga channel kategori yang terhubung ke bot:\n"
+            "• Memeriksa apakah Channel ID terdaftar.\n"
+            "• Memverifikasi apakah toggle **Age-Restricted (NSFW)** sudah aktif."
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text="Gunakan dropdown di bawah untuk beralih halaman panduan.")
+    return embed
+
+
+def build_help_kamus_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🏷️ Kamus Tag Bahasa Indonesia Sugiono",
+        description=(
+            "Sugiono Bot dilengkapi kamus cerdas yang otomatis menerjemahkan istilah sehari-hari bahasa Indonesia ke tag pencarian optimal XVideos:\n"
+            "────────────────────────────────────────"
+        ),
+        color=discord.Color.from_rgb(255, 140, 0),
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    embed.add_field(
+        name="👩 Karakter & Peran:",
+        value=(
+            "• `tante` / `stw` $\\rightarrow$ `milf`\n"
+            "• `ibu tiri` / `mama tiri` $\\rightarrow$ `stepmom`\n"
+            "• `anak sekolah` / `siswi` $\\rightarrow$ `schoolgirl`\n"
+            "• `perawat` / `suster` $\\rightarrow$ `nurse`\n"
+            "• `guru` / `dosen` $\\rightarrow$ `teacher`\n"
+            "• `pelayan` / `pembantu` $\\rightarrow$ `maid`\n"
+            "• `remaja` / `gadis` $\\rightarrow$ `teen`"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="👙 Fisik & Pakaian:",
+        value=(
+            "• `toket besar` $\\rightarrow$ `big tits`\n"
+            "• `pantat besar` $\\rightarrow$ `big ass`\n"
+            "• `montok` $\\rightarrow$ `chubby bbw`\n"
+            "• `pirang` / `bule` $\\rightarrow$ `blonde / western`\n"
+            "• `jilbab` / `kerudung` $\\rightarrow$ `hijab`\n"
+            "• `kostum` $\\rightarrow$ `cosplay`\n"
+            "• `kacamata` $\\rightarrow$ `glasses`"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="🔥 Skenario & Aksi:",
+        value=(
+            "• `selingkuh` $\\rightarrow$ `cheating`\n"
+            "• `pijat` / `urut` $\\rightarrow$ `massage`\n"
+            "• `mandi` $\\rightarrow$ `shower bath`\n"
+            "• `tidur` $\\rightarrow$ `sleeping`\n"
+            "• `intip` $\\rightarrow$ `spy`\n"
+            "• `terjebak` $\\rightarrow$ `stuck`\n"
+            "• `tetangga` $\\rightarrow$ `neighbor`"
+        ),
+        inline=True
+    )
+
+    embed.set_footer(text="Gunakan dropdown di bawah untuk beralih halaman panduan.")
+    return embed
+
+
+def build_help_saluran_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🌐 Sistem 3 Saluran Kategori Video",
+        description=(
+            "Bot Sugiono bekerja secara otomatis memilah dan mengirimkan feed video dewasa ke **3 channel terpisah** setiap 30 menit:\n"
+            "────────────────────────────────────────"
+        ),
+        color=discord.Color.from_rgb(30, 144, 255),
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    for cat_key, cat in CATEGORIES.items():
+        ch_id = cat["channel_id"]
+        ch_obj = bot.get_channel(ch_id) if ch_id else None
+        status = f"Terhubung ke #{ch_obj.name}" if ch_obj else f"ID: `{ch_id or 'Belum diatur'}`"
+        embed.add_field(
+            name=f"{cat['emoji']} {cat['name']}",
+            value=(
+                f"• Saluran: **{status}**\n"
+                f"• Auto-Update: **Maksimal 3 video baru per 30 menit**\n"
+                f"• Sumber Feed: **XVideos Scraper Engine**"
+            ),
+            inline=False
+        )
+
+    embed.set_footer(text="Gunakan dropdown di bawah untuk beralih halaman panduan.")
+    return embed
+
+
+def build_help_keamanan_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🔞 Keamanan & Kebijakan NSFW Discord",
+        description=(
+            "Demi mematuhi **Discord Community Guidelines** dan **Terms of Service**, Sugiono Bot menerapkan aturan keamanan ketat:\n"
+            "────────────────────────────────────────"
+        ),
+        color=discord.Color.red(),
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    embed.add_field(
+        name="⚠️ Syarat Channel Age-Restricted (18+):",
+        value=(
+            "• Semua perintah (`/cari`, `/status`) dan auto-update hanya diizinkan di channel yang memiliki status **NSFW (Age-Restricted)**.\n"
+            "• Jika dijalankan di channel umum non-dewasa, bot akan otomatis menolak permintaan."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="⚙️ Cara Mengaktifkan Status NSFW di Discord:",
+        value=(
+            "1. Klik kanan nama channel yang dituju (misal: `#jav`).\n"
+            "2. Pilih **Edit Channel** (Ikon Gerigi).\n"
+            "3. Buka tab **Overview** lalu scroll ke bawah.\n"
+            "4. Nyalakan toggle **Age-Restricted Channel (NSFW)**.\n"
+            "5. Klik **Save Changes**."
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text="Gunakan dropdown di bawah untuk beralih halaman panduan.")
+    return embed
+
+
+class HelpDropdown(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label="Halaman Utama",
+                emoji="🏠",
+                description="Kembali ke menu pusat panduan utama",
+                value="home"
+            ),
+            discord.SelectOption(
+                label="Perintah & Cara Cari",
+                emoji="🔍",
+                description="Panduan perintah /cari dan /status",
+                value="perintah"
+            ),
+            discord.SelectOption(
+                label="Kamus Bahasa Indonesia",
+                emoji="🏷️",
+                description="Daftar istilah Indonesia yang otomatis diterjemahkan",
+                value="kamus"
+            ),
+            discord.SelectOption(
+                label="3 Saluran Kategori",
+                emoji="🌐",
+                description="Info channel Jepang, Asia, dan Western",
+                value="saluran"
+            ),
+            discord.SelectOption(
+                label="Keamanan & Aturan NSFW",
+                emoji="🔞",
+                description="Aturan konten dewasa & channel Age-Restricted",
+                value="keamanan"
+            ),
+        ]
+        super().__init__(placeholder="👇 Pilih menu untuk panduan lengkap & tips...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        if selected == "home":
+            embed = build_help_home_embed()
+        elif selected == "perintah":
+            embed = build_help_perintah_embed()
+        elif selected == "kamus":
+            embed = build_help_kamus_embed()
+        elif selected == "saluran":
+            embed = build_help_saluran_embed()
+        elif selected == "keamanan":
+            embed = build_help_keamanan_embed()
+        else:
+            embed = build_help_home_embed()
+
+        await interaction.response.edit_message(embed=embed, view=self.view)
+
+
+class HelpView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.add_item(HelpDropdown())
+
+
+@bot.hybrid_command(
+    name="help",
+    aliases=["panduan", "bantuan"],
+    description="Menampilkan pusat panduan lengkap dan fitur bot Sugiono"
+)
+async def help_command(ctx: commands.Context) -> None:
+    """Menampilkan Pusat Panduan Sugiono Bot lengkap dengan menu dropdown interaktif."""
+    await ctx.defer()
+    embed = build_help_home_embed()
+    view = HelpView()
+    await ctx.send(embed=embed, view=view)
+
+
+@bot.event
+async def on_message(message: discord.Message) -> None:
+    if message.author.bot:
+        return
+
+    content = message.content.strip().lower()
+    if content in ["sugiono help", "sugiono panduan", "sugiono bantuan", "sugiono"]:
+        ctx = await bot.get_context(message)
+        await help_command(ctx)
+        return
+
+    await bot.process_commands(message)
+
+
+# ==============================================================================
+# 9. GLOBAL ERROR HANDLER & ENTRYPOINT
 # ==============================================================================
 @bot.event
 async def on_command_error(ctx: commands.Context, error: Exception) -> None:

@@ -86,6 +86,8 @@ python bot.py
 
 | Perintah | Contoh | Keterangan |
 | :--- | :--- | :--- |
+| `/help` / `/panduan` | `/help` | Menampilkan **Pusat Panduan Sugiono Bot** lengkap dengan menu dropdown interaktif (seperti bot RPG/VEKO). |
+| `sugiono help` | `sugiono help` | Trigger bantuan langsung lewat pesan obrolan teks biasa. |
 | `/cari [kata_kunci]` | `/cari keyword: perawat` | Cukup ketik kata kunci di channel masing-masing. Genre video otomatis mengikuti channel (`#jav` = Jepang, `#asia` = Asia, `#western` = Barat). |
 | `/cari [kata_kunci]` | `/cari keyword: anak sekolah` | Mendukung bahasa Indonesia (tante, perawat, sekolah, dll) dan otomatis diterjemahkan ke tag XVideos. |
 | `/status` | `/status` | Menampilkan ringkasan status koneksi ke channel Jepang, Asia, dan Western. |
