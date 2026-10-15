@@ -351,10 +351,14 @@ class MultiChannelAdultBot(commands.Bot):
                     return
 
                 try:
-                    payload = await response.json()
-                except Exception as json_err:
-                    logger.error(f"[Auto-Update] [{cat_name}] Format JSON tidak valid: {json_err}")
-                    return
+                    payload = await response.json(content_type=None)
+                except Exception:
+                    text_data = await response.text()
+                    try:
+                        payload = json.loads(text_data)
+                    except Exception as json_err:
+                        logger.error(f"[Auto-Update] [{cat_name}] Format JSON tidak valid: {json_err}")
+                        return
 
                 # Ekstraksi list data
                 raw_videos = []
@@ -494,11 +498,15 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
                     return
 
                 try:
-                    search_payload = await resp.json()
-                except Exception as json_err:
-                    logger.error(f"Gagal parse JSON hasil pencarian: {json_err}")
-                    await ctx.reply("❌ Respons data dari API tidak valid.", mention_author=True)
-                    return
+                    search_payload = await resp.json(content_type=None)
+                except Exception:
+                    text_search = await resp.text()
+                    try:
+                        search_payload = json.loads(text_search)
+                    except Exception as json_err:
+                        logger.error(f"Gagal parse JSON hasil pencarian: {json_err}")
+                        await ctx.reply("❌ Respons data dari API tidak valid.", mention_author=True)
+                        return
 
                 raw_results = []
                 if isinstance(search_payload, list):
