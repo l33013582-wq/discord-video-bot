@@ -5,7 +5,7 @@ import random
 import logging
 import asyncio
 import urllib.parse
-from typing import Optional, List, Dict, Any, Set
+from typing import Optional, List, Dict, Any, Set, Tuple
 from datetime import datetime, timezone
 
 import aiohttp
@@ -267,6 +267,98 @@ def translate_indonesian_query(query: str) -> str:
         pattern = r"\b" + re.escape(id_phrase) + r"\b"
         translated = re.sub(pattern, en_term, translated)
     return " ".join(translated.split())
+
+
+# ------------------------------------------------------------------------------
+# PENGATURAN DURASI & DETEKSI KODE NUKLIR JAV
+# ------------------------------------------------------------------------------
+VALID_DURATIONS: Set[str] = {"all", "hours", "20min_more", "10-20min", "3-10min", "1-3min"}
+VALID_CATEGORIES: Set[str] = {"auto", "jepang", "asia", "western", "semua"}
+
+DURATION_LABELS: Dict[str, str] = {
+    "hours": "🎬 Jam-jaman / Film Panjang (20m+ Sort Durasi)",
+    "20min_more": "⌛ Panjang (20+ Menit)",
+    "10-20min": "⏱️ Sedang (10 - 20 Menit)",
+    "3-10min": "⚡ Pendek (3 - 10 Menit)",
+    "1-3min": "⚡ Sangat Singkat (1 - 3 Menit)",
+}
+
+DURATION_TEXT_PATTERNS = [
+    (re.compile(r'\b(jam[- ]?jaman|berjam[- ]?jam|film[- ]?panjang|full[- ]?movie|full[- ]?jav|full[- ]?film)\b', re.IGNORECASE), "hours"),
+    (re.compile(r'\b(durasi[- ]?sedang|10[- ]?(?:sampai|ke|to|-)?[- ]?20\s*(?:menit|min))\b', re.IGNORECASE), "10-20min"),
+    (re.compile(r'\b(sangat[- ]?singkat|1[- ]?(?:sampai|ke|to|-)?[- ]?3\s*(?:menit|min))\b', re.IGNORECASE), "1-3min"),
+    (re.compile(r'\b(durasi[- ]?pendek|durasi[- ]?singkat|3[- ]?(?:sampai|ke|to|-)?[- ]?10\s*(?:menit|min))\b', re.IGNORECASE), "3-10min"),
+    (re.compile(r'\b(durasi[- ]?panjang|20\+?\s*(?:menit|min)(\s*keatas)?|20min_more|>20\s*min)\b', re.IGNORECASE), "20min_more"),
+]
+
+JAV_CODE_REGEX = re.compile(
+    r'\b(?:FC2[-_ ]?PPV[-_ ]?\d{4,8}|FC2[-_ ]?\d{4,8}|HEYZO[-_ ]?\d{4,6}|[A-Za-z]{2,6}[-_ ]?\d{2,6})\b',
+    re.IGNORECASE
+)
+FALSE_CODE_POSITIVES: Set[str] = {
+    "top10", "mp4", "1080p", "720p", "4k", "3d", "h264", "h265", "part1", "part2", "vol1", "vol2", "no1", "10min", "20min", "3min"
+}
+
+def detect_jav_code(text: str) -> Optional[str]:
+    """Mendeteksi apakah kata kunci mengandung kode nuklir JAV (contoh: SSIS-878, ALDN-056, FC2-PPV-1234567)."""
+    if not text:
+        return None
+    matches = JAV_CODE_REGEX.findall(text)
+    for m in matches:
+        clean = re.sub(r'[\s_]+', '-', m).upper()
+        has_letters = any(c.isalpha() for c in clean)
+        has_digits = any(c.isdigit() for c in clean)
+        if has_letters and has_digits:
+            raw_alphanumeric = re.sub(r'[^A-Za-z0-9]', '', clean).lower()
+            if raw_alphanumeric not in FALSE_CODE_POSITIVES:
+                if '-' not in clean:
+                    split_match = re.match(r'^([A-Z]+)(\d+)$', clean)
+                    if split_match:
+                        clean = f"{split_match.group(1)}-{split_match.group(2)}"
+                return clean
+    return None
+
+def resolve_search_parameters(
+    raw_durasi: Optional[str] = None,
+    raw_kategori: Optional[str] = None,
+    raw_keyword: Optional[str] = None
+) -> Tuple[str, Optional[str], Optional[str], Optional[str]]:
+    """
+    Mengurai parameter durasi, kategori, dan kata kunci secara fleksibel untuk mendukung
+    baik Slash Command (pilihan dropdown) maupun teks bebas / Prefix command.
+    Mengembalikan (combined_kw, dur_val, cat_val, detected_code).
+    """
+    kw_parts = []
+    dur_val = None
+    cat_val = None
+
+    tokens = [t for t in [raw_durasi, raw_kategori] if t]
+    for token in tokens:
+        tl = token.lower()
+        if tl in VALID_DURATIONS and dur_val is None:
+            dur_val = tl
+        elif tl in VALID_CATEGORIES and cat_val is None:
+            cat_val = tl
+        else:
+            kw_parts.append(token)
+
+    if raw_keyword:
+        kw_parts.append(raw_keyword)
+
+    combined_kw = " ".join(kw_parts).strip()
+
+    # Jika durasi belum dipilih dari dropdown, cek apakah user mengetik durasi dalam teks
+    if not dur_val or dur_val == "all":
+        for pattern, dur_key in DURATION_TEXT_PATTERNS:
+            if pattern.search(combined_kw):
+                dur_val = dur_key
+                combined_kw = pattern.sub("", combined_kw).strip()
+                break
+
+    combined_kw = re.sub(r"\s+", " ", combined_kw).strip()
+    detected_code = detect_jav_code(combined_kw)
+
+    return combined_kw, dur_val, cat_val, detected_code
 
 
 # ==============================================================================
@@ -736,16 +828,43 @@ bot = MultiChannelAdultBot()
 # ==============================================================================
 # 7. PERINTAH INTERAKTIF PENCARIAN (/cari [kata_kunci])
 # ==============================================================================
+# 7. PERINTAH INTERAKTIF PENCARIAN (/cari)
+# ==============================================================================
 @bot.hybrid_command(
     name="cari",
     aliases=["search", "find"],
-    description="Cari video sesuai genre channel ini (contoh: /cari perawat)"
+    description="Cari video sesuai kata kunci, kode nuklir JAV, durasi, dan kategori"
 )
 @discord.app_commands.describe(
-    keyword="Apa yang ingin dicari (contoh: perawat, tante, anak sekolah, cosplay)"
+    durasi="Filter durasi video (opsional: jam-jaman, 20+ min, 10-20 min, 3-10 min)",
+    kategori="Pilihan kategori video (opsional: otomatis sesuai channel aktif)",
+    keyword="Kata kunci pencarian atau Kode Nuklir JAV (contoh: perawat, SSIS-878, ALDN-056)"
 )
-async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) -> None:
-    """Perintah pencarian video. Otomatis menyesuaikan genre dengan channel tempat perintah diketik."""
+@discord.app_commands.choices(
+    durasi=[
+        discord.app_commands.Choice(name="⏳ Semua Durasi", value="all"),
+        discord.app_commands.Choice(name="🎬 Jam-jaman / Film Panjang (20m+ Sort Durasi)", value="hours"),
+        discord.app_commands.Choice(name="⌛ Panjang (20+ Menit)", value="20min_more"),
+        discord.app_commands.Choice(name="⏱️ Sedang (10 - 20 Menit)", value="10-20min"),
+        discord.app_commands.Choice(name="⚡ Pendek (3 - 10 Menit)", value="3-10min"),
+        discord.app_commands.Choice(name="⚡ Sangat Singkat (1 - 3 Menit)", value="1-3min"),
+    ],
+    kategori=[
+        discord.app_commands.Choice(name="🔄 Otomatis (Sesuai Channel)", value="auto"),
+        discord.app_commands.Choice(name="🇯🇵 Jepang (JAV)", value="jepang"),
+        discord.app_commands.Choice(name="🌏 Asia (Non-Jepang)", value="asia"),
+        discord.app_commands.Choice(name="🌍 Western (Barat)", value="western"),
+        discord.app_commands.Choice(name="🌐 Semua Kategori (Bebas)", value="semua"),
+    ]
+)
+async def cari_video(
+    ctx: commands.Context,
+    durasi: Optional[str] = None,
+    kategori: Optional[str] = None,
+    *,
+    keyword: Optional[str] = None
+) -> None:
+    """Perintah pencarian video. Mendukung kata kunci, kode nuklir JAV, filter durasi, dan kategori."""
     # 1. Panggil defer() segera di baris pertama agar Discord interaksi tidak pernah timeout 3 detik
     await ctx.defer()
 
@@ -766,67 +885,99 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
         await ctx.send(embed=warning_embed)
         return
 
-    # Deteksi kategori otomatis dari channel tempat perintah dijalankan
+    # 3. Parsing parameter fleksibel (Slash command choices, input keyword, kode nuklir, dan durasi)
+    combined_kw, dur_val, cat_val, detected_code = resolve_search_parameters(durasi, kategori, keyword)
+
+    # Deteksi channel aktif
     channel_name = getattr(ctx.channel, "name", "channel")
-    current_category = None
+    channel_category = None
     for cat_key, cat_data in CATEGORIES.items():
         if cat_data["channel_id"] == ctx.channel.id:
-            current_category = cat_data
+            channel_category = cat_data
             break
 
-    # 3. Validasi Kata Kunci
-    if not keyword or not keyword.strip():
-        help_embed = discord.Embed(
-            title="ℹ️ Cara Menggunakan Perintah /cari",
-            description=(
-                f"Ketik apa yang ingin Anda cari langsung di channel ini.\n"
-                f"Hasil pencarian otomatis disesuaikan dengan genre channel **#{channel_name}**!\n\n"
-                "**Format:** `/cari [kata_kunci]`\n\n"
-                "**Contoh:**\n"
-                "• `/cari perawat`\n"
-                "• `/cari tante`\n"
-                "• `/cari anak sekolah`\n"
-                "• `/cari cosplay`\n"
-                "• `/cari pijat`\n\n"
-                f"💡 *Genre Channel Saat Ini:* **{current_category['name'] if current_category else 'Bebas / Umum'}**"
-            ),
-            color=discord.Color.gold()
-        )
-        await ctx.send(embed=help_embed)
-        return
+    # Jika keyword kosong dan ada durasi di channel tertentu, gunakan default genre channel
+    if not combined_kw and not detected_code:
+        if channel_category and dur_val:
+            combined_kw = channel_category["keywords"][0]
+        else:
+            help_embed = discord.Embed(
+                title="ℹ️ Cara Menggunakan Perintah /cari",
+                description=(
+                    "Ketik apa yang ingin Anda cari langsung di channel ini atau gunakan opsi filter!\n\n"
+                    "**1. Cari Biasa:** `/cari keyword: perawat` *(otomatis sesuai channel)*\n"
+                    "**2. Cari Kode Nuklir JAV:** `/cari keyword: SSIS-878` atau `/cari keyword: ALDN-056`\n"
+                    "**3. Filter Durasi:** `/cari durasi: Jam-jaman keyword: perawat` atau `/cari keyword: perawat 20 menit`\n"
+                    "**4. Pilih Kategori:** `/cari kategori: Jepang (JAV) keyword: tante`\n\n"
+                    f"💡 *Genre Channel Saat Ini:* **{channel_category['name'] if channel_category else 'Bebas / Umum'}**"
+                ),
+                color=discord.Color.gold()
+            )
+            await ctx.send(embed=help_embed)
+            return
 
-    keyword = keyword.strip()
-
-    # Jika dijalankan di channel umum (bukan Jepang/Asia/Western), coba deteksi dari kata kunci
-    if not current_category:
-        kw_lower = keyword.lower()
-        if any(w in kw_lower for w in ["jepang", "jav"]):
+    # 4. Tentukan kategori akhir
+    current_category = None
+    if cat_val and cat_val not in ["auto", "semua"]:
+        current_category = CATEGORIES.get(cat_val)
+    elif cat_val == "semua":
+        current_category = None
+    elif detected_code:
+        # Jika terdeteksi Kode Nuklir JAV (misal SSIS-878, ALDN-056), otomatis jadikan kategori Jepang (JAV)
+        current_category = CATEGORIES["jepang"]
+    elif channel_category:
+        current_category = channel_category
+    else:
+        # Cek nama channel
+        ch_lower = channel_name.lower()
+        if "jav" in ch_lower or "jepang" in ch_lower:
             current_category = CATEGORIES["jepang"]
-        elif any(w in kw_lower for w in ["barat", "bule", "western"]):
-            current_category = CATEGORIES["western"]
-        elif any(w in kw_lower for w in ["asia", "indo", "korea", "cina", "china"]):
+        elif "asia" in ch_lower:
             current_category = CATEGORIES["asia"]
+        elif "western" in ch_lower or "barat" in ch_lower:
+            current_category = CATEGORIES["western"]
+        elif combined_kw:
+            kw_lower = combined_kw.lower()
+            if any(w in kw_lower for w in ["jepang", "jav"]):
+                current_category = CATEGORIES["jepang"]
+            elif any(w in kw_lower for w in ["barat", "bule", "western"]):
+                current_category = CATEGORIES["western"]
+            elif any(w in kw_lower for w in ["asia", "indo", "korea", "cina", "china"]):
+                current_category = CATEGORIES["asia"]
 
-    # Terjemahkan kata kunci Bahasa Indonesia ke istilah tag bahasa Inggris
-    en_query = translate_indonesian_query(keyword)
-
-    # Bentuk final search query untuk XVideos sesuai genre channel
-    if current_category:
-        cat_prefix = current_category["keywords"][0]
-        if cat_prefix not in en_query:
-            query_str = f"{cat_prefix} {en_query}"
+    # 5. Bentuk kata kunci pencarian
+    if detected_code:
+        query_str = combined_kw
+        en_query = combined_kw
+    else:
+        en_query = translate_indonesian_query(combined_kw)
+        if current_category:
+            cat_prefix = current_category["keywords"][0]
+            if cat_prefix not in en_query:
+                query_str = f"{cat_prefix} {en_query}"
+            else:
+                query_str = en_query
         else:
             query_str = en_query
-    else:
-        query_str = en_query
 
-    logger.info(f"User {ctx.author} mencari '{keyword}' (Tag: '{en_query}', Final: '{query_str}') di #{channel_name} (Genre Channel: {current_category['name'] if current_category else 'Bebas'})")
+    dur_info = DURATION_LABELS.get(dur_val, dur_val) if dur_val else "Semua"
+    logger.info(
+        f"User {ctx.author} mencari '{combined_kw}' (Tag: '{en_query}', Final: '{query_str}', "
+        f"Kode Nuklir: {detected_code or 'Tidak'}, Durasi: {dur_info}, Kategori: {current_category['name'] if current_category else 'Bebas'}) di #{channel_name}"
+    )
 
     try:
-        # 1. Prioritas Pertama: Cari langsung ke XVideos
+        # 1. Prioritas Pertama: Cari langsung ke XVideos dengan parameter durasi
         raw_results = []
         try:
-            async with bot.session.get("https://www.xvideos.com/", params={"k": query_str}, proxy=bot.proxy, timeout=aiohttp.ClientTimeout(total=8)) as xv_resp:
+            xv_params: Dict[str, str] = {"k": query_str}
+            if dur_val == "hours":
+                xv_params["durf"] = "20min_more"
+                xv_params["sort"] = "length"
+            elif dur_val and dur_val in ["20min_more", "10-20min", "3-10min", "1-3min"]:
+                xv_params["durf"] = dur_val
+
+            async with bot.session.get("https://www.xvideos.com/", params=xv_params, proxy=bot.proxy, timeout=aiohttp.ClientTimeout(total=8)) as xv_resp:
                 if xv_resp.status == 200:
                     xv_html = await xv_resp.text()
                     xv_results = parse_xvideos_html(xv_html, default_category=current_category["name"] if current_category else None)
@@ -835,8 +986,24 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
         except Exception as xv_err:
             logger.info(f"Pencarian XVideos gagal/timeout: {xv_err}")
 
-        # 2. Jika XVideos kosong, gunakan Redtube API sebagai cadangan
-        if not raw_results:
+        # Jika mencari Kode Nuklir JAV, prioritaskan video yang judulnya memuat kode tersebut
+        exact_code_matches = []
+        if detected_code and raw_results:
+            code_upper = detected_code.upper()
+            code_no_dash = code_upper.replace("-", "")
+            code_space = code_upper.replace("-", " ")
+            other_matches = []
+            for item in raw_results:
+                t_upper = (item.get("title") or "").upper()
+                if code_upper in t_upper or code_no_dash in t_upper or code_space in t_upper:
+                    exact_code_matches.append(item)
+                else:
+                    other_matches.append(item)
+            if exact_code_matches:
+                raw_results = exact_code_matches + other_matches
+
+        # 2. Jika XVideos kosong dan bukan kode spesifik JAV, gunakan Redtube API sebagai cadangan
+        if not raw_results and not detected_code:
             try:
                 fallback_url = "https://api.redtube.com/"
                 fallback_params = {
@@ -854,9 +1021,18 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
                 logger.error(f"Fallback search API gagal: {fb_err}")
 
         if not raw_results:
+            not_found_desc = f"Tidak ditemukan video dengan kata kunci: **{combined_kw}**."
+            if detected_code:
+                not_found_desc = (
+                    f"Tidak ditemukan video dengan Kode Nuklir: **`{detected_code}`**.\n"
+                    "Pastikan kode produksi JAV sudah benar (contoh: `SSIS-878`, `ALDN-056`, `FC2-PPV-1234567`)."
+                )
+            elif dur_val and dur_val in DURATION_LABELS:
+                not_found_desc += f"\nFilter Durasi aktif: `{DURATION_LABELS[dur_val]}`. Coba ganti ke durasi lain."
+
             not_found_embed = discord.Embed(
                 title="🔍 Hasil Pencarian Tidak Ditemukan",
-                description=f"Tidak ditemukan video dengan kata kunci: **{keyword}** (`{en_query}`).\nCobalah dengan kata kunci lain.",
+                description=not_found_desc,
                 color=discord.Color.dark_gray()
             )
             await ctx.send(embed=not_found_embed)
@@ -876,12 +1052,22 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
 
         if direct_mp4:
             # Kirim sebagai Native Inline Video Player (Langsung bisa diputar di Discord)
-            lines = [
-                f"🔞 **{top_video['title']}**",
-                f"⏱️ `{top_video.get('duration', 'N/A')}` • 🌐 `{current_category['name'] if current_category else 'Bebas'}`"
-            ]
-            if en_query != keyword.lower():
-                lines.append(f"🔍 Kata Kunci: `{keyword}` (Tag: `{en_query}`)")
+            if detected_code and (exact_code_matches or detected_code.upper() in top_video["title"].upper()):
+                lines = [f"🔞 **[KODE NUKLIR: {detected_code}]** {top_video['title']}"]
+            else:
+                lines = [f"🔞 **{top_video['title']}**"]
+
+            lines.append(f"⏱️ `{top_video.get('duration', 'N/A')}` • 🌐 `{current_category['name'] if current_category else 'Bebas'}`")
+
+            if detected_code:
+                match_note = " *(Judul Cocok Persis)*" if exact_code_matches else ""
+                lines.append(f"🏷️ **Kode Nuklir:** `{detected_code}`{match_note}")
+
+            if dur_val and dur_val in DURATION_LABELS:
+                lines.append(f"⏳ **Filter Durasi:** `{DURATION_LABELS[dur_val]}`")
+
+            if not detected_code and en_query != combined_kw.lower():
+                lines.append(f"🔍 **Kata Kunci:** `{combined_kw}` (Tag: `{en_query}`)")
 
             lines.append(direct_mp4)
 
@@ -892,10 +1078,18 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
         else:
             # Fallback ke format embed jika direct mp4 tidak tersedia
             embed = create_video_embed(top_video, category_info=current_category, is_search=True)
-            if en_query != keyword.lower():
+            if detected_code:
+                embed.add_field(
+                    name="🏷️ Kode Nuklir JAV",
+                    value=f"`{detected_code}`" + (" *(Judul Cocok Persis)*" if exact_code_matches else ""),
+                    inline=True
+                )
+            if dur_val and dur_val in DURATION_LABELS:
+                embed.add_field(name="⏳ Filter Durasi", value=DURATION_LABELS[dur_val], inline=True)
+            if not detected_code and en_query != combined_kw.lower():
                 embed.add_field(
                     name="🔍 Kata Kunci Pencarian",
-                    value=f"• Asli: `{keyword}`\n• Terjemahan Tag: `{en_query}`",
+                    value=f"• Asli: `{combined_kw}`\n• Terjemahan Tag: `{en_query}`",
                     inline=False
                 )
             if additional_links:
@@ -971,7 +1165,7 @@ def build_help_home_embed() -> discord.Embed:
     embed.add_field(
         name="🎣 Perintah Dasar Cepat:",
         value=(
-            "• `/cari [kata_kunci]` — Cari video instan sesuai genre di channel aktif *(Bisa Diputar Langsung)*\n"
+            "• `/cari [kata_kunci / kode_nuklir]` — Cari video instan, dukung kode JAV (SSIS, ALDN) & filter durasi *(Bisa Diputar Langsung)*\n"
             "• `/status` — Cek status koneksi 3 channel kategori & verifikasi status NSFW\n"
             "• `/help` — Menampilkan pusat panduan interaktif ini"
         ),
@@ -989,14 +1183,13 @@ def build_help_home_embed() -> discord.Embed:
     )
 
     embed.add_field(
-        name="🇮🇩 Contoh Pencarian Bahasa Indonesia Cepat:",
+        name="🎬 Contoh Pencarian & Kode Nuklir JAV:",
         value=(
-            "• `/cari perawat` — Dicari sesuai genre channel tempat Anda berada\n"
-            "• `/cari tante` — Diterjemahkan ke tag `milf` *(mature)*\n"
-            "• `/cari anak sekolah` — Diterjemahkan ke tag `schoolgirl`\n"
-            "• `/cari cosplay` — Mencari video cosplay di channel aktif\n"
-            "• `/cari jilbab indo` — Diterjemahkan ke `hijab indonesian`\n"
-            "• `/cari bule pirang` — Diterjemahkan ke `western blonde`"
+            "• `/cari keyword: SSIS-878` — Mencari judul video yang cocok dengan Kode Nuklir JAV\n"
+            "• `/cari keyword: ALDN-056` — Deteksi kode otomatis & langsung siap diputar di Discord\n"
+            "• `/cari perawat jam-jaman` — Mencari film JAV berdurasi panjang jam-jaman (20m+ sort panjang)\n"
+            "• `/cari tante 10-20 menit` — Mencari video dengan rentang durasi sedang 10-20 menit\n"
+            "• `/cari bule pirang` — Diterjemahkan otomatis ke tag `western blonde`"
         ),
         inline=False
     )
@@ -1004,8 +1197,10 @@ def build_help_home_embed() -> discord.Embed:
     embed.add_field(
         name="✨ Keunggulan Sugiono Bot:",
         value=(
-            "• 🎬 **Native Video Player** — Video langsung diputar di Discord (ada tombol Play)\n"
-            "• ⚡ **Zero-Timeout** — Respon interaksi instan < 0.1 detik, tanpa timeout\n"
+            "• 🎬 **Native Video Player** — Video langsung diputar di Discord (ada tombol Play di tengah)\n"
+            "• 🏷️ **Kode Nuklir JAV** — Cari langsung video berdasar kode resmi (SSIS, ALDN, FC2-PPV, IPX)\n"
+            "• ⏳ **Filter Durasi Lengkap** — Mulai dari klip pendek (1-10m) hingga film utuh jam-jaman\n"
+            "• ⚡ **Zero-Timeout** — Respon interaksi instan < 0.1 detik, tanpa timeout interaksi Discord\n"
             "• 🔞 **Age-Restricted Safe** — Wajib channel NSFW sesuai ketentuan Discord"
         ),
         inline=False
@@ -1019,8 +1214,7 @@ def build_help_perintah_embed() -> discord.Embed:
     embed = discord.Embed(
         title="🔍 Panduan Perintah & Cara Mencari Video",
         description=(
-            "Sugiono Bot dirancang agar Anda **tidak perlu repot memilih kategori**.\n"
-            "Cukup buka channel yang sesuai lalu ketik `/cari`!\n"
+            "Sugiono Bot dirancang fleksibel: bisa otomatis mengikuti genre channel atau memilih manual!\n"
             "────────────────────────────────────────"
         ),
         color=discord.Color.gold(),
@@ -1028,13 +1222,13 @@ def build_help_perintah_embed() -> discord.Embed:
     )
 
     embed.add_field(
-        name="📌 1. Perintah `/cari [kata_kunci]`",
+        name="📌 1. Perintah `/cari` Lengkap:",
         value=(
-            "Mencari video dewasa secara instan.\n"
-            "• **Di channel `#jav`:** `/cari perawat` $\\rightarrow$ Mencari JAV Jepang bertema perawat.\n"
-            "• **Di channel `#asia`:** `/cari perawat` $\\rightarrow$ Mencari video Asia bertema perawat.\n"
-            "• **Di channel `#western`:** `/cari perawat` $\\rightarrow$ Mencari video Barat bertema perawat.\n\n"
-            "👉 *Hasil pencarian akan langsung muncul sebagai Video Player dengan tombol Play di tengah!*"
+            "Mencari video dewasa secara instan dengan 3 opsi fleksibel:\n"
+            "• **Keyword / Kode Nuklir:** `/cari keyword: perawat` atau `/cari keyword: SSIS-878`\n"
+            "• **Filter Durasi:** `/cari durasi: Jam-jaman keyword: perawat`\n"
+            "• **Pilihan Kategori:** `/cari kategori: Jepang (JAV) keyword: tante`\n\n"
+            "👉 *Otomatis muncul sebagai Player Video dengan tombol Play di tengah!*"
         ),
         inline=False
     )
@@ -1045,6 +1239,58 @@ def build_help_perintah_embed() -> discord.Embed:
             "Menampilkan status ketiga channel kategori yang terhubung ke bot:\n"
             "• Memeriksa apakah Channel ID terdaftar.\n"
             "• Memverifikasi apakah toggle **Age-Restricted (NSFW)** sudah aktif."
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text="Gunakan dropdown di bawah untuk beralih halaman panduan.")
+    return embed
+
+
+def build_help_nuklir_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🎬 Panduan Kode Nuklir JAV & Filter Durasi",
+        description=(
+            "Fitur canggih Sugiono Bot untuk mencari video berdasarkan **Kode Nuklir (Production Code JAV)** "
+            "dan memfilter berdasarkan **Durasi Video** (mulai dari klip singkat hingga film utuh jam-jaman).\n"
+            "────────────────────────────────────────"
+        ),
+        color=discord.Color.from_rgb(255, 20, 147),
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    embed.add_field(
+        name="🏷️ 1. Pencarian Kode Nuklir JAV:",
+        value=(
+            "Setiap judul video JAV resmi memiliki kode produksi unik. Cukup ketik kodenya di `/cari`:\n"
+            "• `/cari keyword: SSIS-878`\n"
+            "• `/cari keyword: ALDN-056`\n"
+            "• `/cari keyword: FC2-PPV-3124567`\n"
+            "• `/cari keyword: IPX-534`\n"
+            "• `/cari keyword: MIDE-523`\n\n"
+            "👉 *Bot akan langsung mencocokkan video yang judulnya memuat kode tersebut di platform dan merendernya sebagai Video Player yang siap diputar!*"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="⏳ 2. Filter Durasi Video (Pendek hingga Jam-jaman):",
+        value=(
+            "Gunakan dropdown `durasi` pada Slash Command atau ketik langsung di kata kunci:\n"
+            "• 🎬 **Jam-jaman (20m+ Sort Durasi)**: `/cari durasi: Jam-jaman` atau `/cari perawat jam-jaman` (menampilkan film berdurasi hingga 2-4 jam)\n"
+            "• ⌛ **Panjang (20+ Menit)**: `/cari durasi: Panjang` atau `/cari perawat 20 menit`\n"
+            "• ⏱️ **Sedang (10 - 20 Menit)**: `/cari durasi: Sedang` atau `/cari tante 10-20 menit`\n"
+            "• ⚡ **Pendek (3 - 10 Menit)**: `/cari durasi: Pendek` atau `/cari siswi durasi pendek`\n"
+            "• ⚡ **Sangat Singkat (1 - 3 Menit)**: `/cari durasi: Sangat Singkat` (preview/teaser)"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🌐 3. Pilihan Kategori Fleksibel:",
+        value=(
+            "• **Otomatis (Default)**: Otomatis mengikuti channel aktif (`#jav` $\\rightarrow$ Jepang, `#asia` $\\rightarrow$ Asia, `#western` $\\rightarrow$ Barat).\n"
+            "• **Pilihan Manual**: Bebas memilih genre video lain melalui dropdown `kategori:` tanpa harus berpindah channel."
         ),
         inline=False
     )
@@ -1191,6 +1437,12 @@ class HelpDropdown(discord.ui.Select):
                 value="perintah"
             ),
             discord.SelectOption(
+                label="Kode Nuklir & Durasi",
+                emoji="🎬",
+                description="Panduan kode JAV (SSIS, ALDN) & filter durasi",
+                value="nuklir"
+            ),
+            discord.SelectOption(
                 label="Kamus Bahasa Indonesia",
                 emoji="🏷️",
                 description="Daftar istilah Indonesia yang otomatis diterjemahkan",
@@ -1217,6 +1469,8 @@ class HelpDropdown(discord.ui.Select):
             embed = build_help_home_embed()
         elif selected == "perintah":
             embed = build_help_perintah_embed()
+        elif selected == "nuklir":
+            embed = build_help_nuklir_embed()
         elif selected == "kamus":
             embed = build_help_kamus_embed()
         elif selected == "saluran":

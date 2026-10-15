@@ -86,10 +86,12 @@ python bot.py
 
 | Perintah | Contoh | Keterangan |
 | :--- | :--- | :--- |
-| `/help` / `/panduan` | `/help` | Menampilkan **Pusat Panduan Sugiono Bot** lengkap dengan menu dropdown interaktif (seperti bot RPG/VEKO). |
-| `sugiono help` | `sugiono help` | Trigger bantuan langsung lewat pesan obrolan teks biasa. |
+| `/help` / `/panduan` | `/help` | Menampilkan **Pusat Panduan Sugiono Bot** lengkap dengan menu dropdown interaktif (Panduan Perintah, Kode Nuklir, Kamus Tag, Saluran, Keamanan). |
+| `sugiono help` | `sugiono help` | Trigger bantuan langsung lewat obrolan teks biasa. |
 | `/cari [kata_kunci]` | `/cari keyword: perawat` | Cukup ketik kata kunci di channel masing-masing. Genre video otomatis mengikuti channel (`#jav` = Jepang, `#asia` = Asia, `#western` = Barat). |
-| `/cari [kata_kunci]` | `/cari keyword: anak sekolah` | Mendukung bahasa Indonesia (tante, perawat, sekolah, dll) dan otomatis diterjemahkan ke tag XVideos. |
-| `/status` | `/status` | Menampilkan ringkasan status koneksi ke channel Jepang, Asia, dan Western. |
+| `/cari [kode_nuklir]` | `/cari keyword: SSIS-878` | **Pencarian Kode Nuklir JAV** (misal: `SSIS-878`, `ALDN-056`, `FC2-PPV-3124567`, `IPX-534`, `MIDE-523`). Bot otomatis mencari dan mencocokkan judul video berdasar kode produksi resmi JAV. |
+| `/cari [durasi]` | `/cari durasi: Jam-jaman keyword: perawat` | **Filter Durasi Video**: Pilihan: `Jam-jaman (20m+ Sort Durasi)`, `Panjang (20+m)`, `Sedang (10-20m)`, `Pendek (3-10m)`. Bisa juga diketik langsung di keyword (contoh: `/cari perawat jam-jaman` atau `/cari tante 10-20 menit`). |
+| `/cari [kategori]` | `/cari kategori: Jepang (JAV) keyword: perawat` | **Pilihan Kategori Bebas**: Bebas memilih kategori (`Jepang`, `Asia`, `Western`, `Semua`) atau biarkan `Otomatis` sesuai channel aktif. |
+| `/status` | `/status` | Menampilkan ringkasan status koneksi ke channel Jepang, Asia, dan Western beserta verifikasi status NSFW. |
 | `/search` / `/find` | `/search keyword: cosplay` | Alias dari perintah `/cari`. |
-| `!cari` / `!status` | `!cari perawat` | Tetap didukung sebagai fallback jika Anda lebih suka tanda seru. |
+| `!cari` / `!status` | `!cari SSIS-878` | Tetap didukung sebagai prefix commands fallback jika Anda lebih suka tanda seru `!`. |
