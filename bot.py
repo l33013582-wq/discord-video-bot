@@ -288,6 +288,22 @@ def create_video_embed(video: Dict[str, Any], category_info: Optional[Dict[str, 
 
 
 # ==============================================================================
+# DISCORD UI VIEW: TOMBOL INTERAKTIF TONTON VIDEO
+# ==============================================================================
+class VideoActionView(discord.ui.View):
+    """Membuat tombol interaktif Discord yang bisa langsung diklik untuk menonton."""
+    def __init__(self, video_url: str):
+        super().__init__(timeout=None)
+        if video_url and video_url.startswith("http"):
+            self.add_item(discord.ui.Button(
+                label="▶️ Tonton Video",
+                url=video_url,
+                style=discord.ButtonStyle.link,
+                emoji="🔞"
+            ))
+
+
+# ==============================================================================
 # 5. CUSTOM BOT CLIENT & MULTI-CHANNEL AUTO-UPDATE
 # ==============================================================================
 class MultiChannelAdultBot(commands.Bot):
@@ -448,22 +464,6 @@ class MultiChannelAdultBot(commands.Bot):
                 continue
 
         return []
-
-# ==============================================================================
-# DISCORD UI VIEW: TOMBOL INTERAKTIF TONTON VIDEO
-# ==============================================================================
-class VideoActionView(discord.ui.View):
-    """Membuat tombol interaktif Discord yang bisa langsung diklik untuk menonton."""
-    def __init__(self, video_url: str):
-        super().__init__(timeout=None)
-        if video_url and video_url.startswith("http"):
-            self.add_item(discord.ui.Button(
-                label="▶️ Tonton Video",
-                url=video_url,
-                style=discord.ButtonStyle.link,
-                emoji="🔞"
-            ))
-
 
     async def _process_category_update(self, channel: discord.abc.Messageable, cat_info: Dict[str, Any]) -> None:
         """Mengambil data video terbaru dari API untuk kategori tertentu dan mengirimkannya."""
