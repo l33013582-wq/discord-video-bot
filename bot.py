@@ -117,8 +117,11 @@ class VideoHistoryManager:
 # ==============================================================================
 # 4. HELPER PARSER DATA API & PEMBUAT DISCORD EMBED
 # ==============================================================================
-def normalize_video_data(item: Dict[str, Any], default_category: Optional[str] = None) -> Dict[str, Any]:
-    """Menormalisasi data respons JSON API (mendukung Eporner & format generik)."""
+def normalize_video_data(raw_item: Dict[str, Any], default_category: Optional[str] = None) -> Dict[str, Any]:
+    """Menormalisasi data respons JSON API (mendukung Eporner, Redtube, dan format generik)."""
+    # Jika format Redtube, data dibungkus di dalam key 'video'
+    item = raw_item.get("video") if isinstance(raw_item.get("video"), dict) else raw_item
+
     video_id = (
         item.get("id") or 
         item.get("video_id") or 
@@ -139,8 +142,8 @@ def normalize_video_data(item: Dict[str, Any], default_category: Optional[str] =
         (f"https://www.eporner.com/video-{video_id}/" if video_id else "")
     )
 
-    # Ekstraksi thumbnail (bisa berupa dictionary src/url atau string)
-    raw_thumb = item.get("default_thumb") or item.get("thumbnail") or item.get("preview_image") or item.get("poster")
+    # Ekstraksi thumbnail (mendukung dict, thumb, default_thumb, poster)
+    raw_thumb = item.get("default_thumb") or item.get("thumb") or item.get("thumbnail") or item.get("preview_image") or item.get("poster")
     thumbnail = None
     if isinstance(raw_thumb, dict):
         thumbnail = raw_thumb.get("src") or raw_thumb.get("url")
@@ -158,17 +161,23 @@ def normalize_video_data(item: Dict[str, Any], default_category: Optional[str] =
     if not duration:
         duration = "N/A"
 
-    # Ekstraksi tags / keywords
+    # Ekstraksi tags / keywords (mendukung list of dicts Redtube atau string/list)
     raw_tags = item.get("keywords") or item.get("tags") or item.get("categories") or []
     if isinstance(raw_tags, str):
         tags_str = ", ".join([t.strip() for t in raw_tags.split(",")[:4]])
     elif isinstance(raw_tags, list):
-        tags_str = ", ".join(str(t) for t in raw_tags[:4])
+        tag_list = []
+        for t in raw_tags[:4]:
+            if isinstance(t, dict):
+                tag_list.append(t.get("tag_name") or t.get("name") or str(t))
+            else:
+                tag_list.append(str(t))
+        tags_str = ", ".join(tag_list) if tag_list else "Umum"
     else:
         tags_str = "Umum"
 
     # Rating & Views
-    rate = item.get("rate")
+    rate = item.get("rate") or item.get("rating")
     views = item.get("views")
 
     return {
@@ -339,72 +348,81 @@ class MultiChannelAdultBot(commands.Bot):
         logger.info("[Auto-Update] Siklus auto-update 3 channel selesai.")
         logger.info("=" * 60)
 
+    async def _fetch_videos_with_fallback(self, primary_url: str, fallback_query: str) -> List[Dict[str, Any]]:
+        """Mengambil data video dengan fallback otomatis ke Redtube API jika primary API terblokir/gagal."""
+        urls_to_try = [
+            primary_url,
+            f"https://api.redtube.com/?data=redtube.Videos.searchVideos&output=json&search={fallback_query}"
+        ]
+
+        for target_url in urls_to_try:
+            try:
+                async with self.session.get(target_url, proxy=self.proxy, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                    if response.status != 200:
+                        continue
+                    try:
+                        payload = await response.json(content_type=None)
+                    except Exception:
+                        text_data = await response.text()
+                        try:
+                            payload = json.loads(text_data)
+                        except Exception:
+                            continue
+
+                    raw_videos = []
+                    if isinstance(payload, list):
+                        raw_videos = payload
+                    elif isinstance(payload, dict):
+                        raw_videos = payload.get("videos") or payload.get("data") or payload.get("items") or []
+
+                    if raw_videos:
+                        return raw_videos
+            except Exception:
+                continue
+
+        return []
+
     async def _process_category_update(self, channel: discord.abc.Messageable, cat_info: Dict[str, Any]) -> None:
         """Mengambil data video terbaru dari API untuk kategori tertentu dan mengirimkannya."""
         cat_name = cat_info["name"]
+        cat_query = cat_info["keywords"][0]
         api_url = cat_info["api_url"]
 
         try:
-            async with self.session.get(api_url, proxy=self.proxy) as response:
-                if response.status != 200:
-                    logger.error(f"[Auto-Update] [{cat_name}] API merespons dengan HTTP {response.status}")
-                    return
+            raw_videos = await self._fetch_videos_with_fallback(api_url, cat_query)
+            if not raw_videos:
+                logger.warning(f"[Auto-Update] [{cat_name}] Tidak ada video ditemukan dari API.")
+                return
 
+            # Filter video baru (deduplikasi ID)
+            new_videos = []
+            for raw_item in raw_videos:
+                item_data = normalize_video_data(raw_item, default_category=cat_info["name"])
+                if item_data["id"] and not self.history.is_seen(item_data["id"]):
+                    new_videos.append(item_data)
+
+            if not new_videos:
+                logger.info(f"[Auto-Update] [{cat_name}] Semua video sudah pernah diunggah.")
+                return
+
+            logger.info(f"[Auto-Update] [{cat_name}] Ditemukan {len(new_videos)} video baru. Mengunggah ke #{channel.name}...")
+
+            # Batasi maksimal 3 video per kategori setiap 30 menit agar feed channel rapi
+            videos_to_send = list(reversed(new_videos))[-3:]
+
+            for video in videos_to_send:
+                embed = create_video_embed(video, category_info=cat_info, is_search=False)
                 try:
-                    payload = await response.json(content_type=None)
-                except Exception:
-                    text_data = await response.text()
-                    try:
-                        payload = json.loads(text_data)
-                    except Exception as json_err:
-                        logger.error(f"[Auto-Update] [{cat_name}] Gagal decode JSON. Status: {response.status}, Header: {dict(response.headers)}, Snippet: {repr(text_data[:300])}")
-                        return
+                    await channel.send(embed=embed)
+                    self.history.mark_as_seen(video["id"])
+                    logger.info(f"[Auto-Update] [{cat_name}] Berhasil posting: {video['title'][:40]} (ID: {video['id']})")
+                    await asyncio.sleep(2)  # Delay rate limit Discord
+                except discord.Forbidden:
+                    logger.error(f"[Auto-Update] [{cat_name}] Tidak memiliki izin kirim pesan di channel #{channel.name}!")
+                    break
+                except Exception as send_err:
+                    logger.error(f"[Auto-Update] [{cat_name}] Gagal mengirim embed: {send_err}")
 
-                # Ekstraksi list data
-                raw_videos = []
-                if isinstance(payload, list):
-                    raw_videos = payload
-                elif isinstance(payload, dict):
-                    raw_videos = payload.get("videos") or payload.get("data") or payload.get("items") or []
-
-                if not raw_videos:
-                    logger.info(f"[Auto-Update] [{cat_name}] Tidak ada video ditemukan dari respons API.")
-                    return
-
-                # Filter video baru (deduplikasi ID)
-                new_videos = []
-                for raw_item in raw_videos:
-                    item_data = normalize_video_data(raw_item, default_category=cat_info["name"])
-                    if item_data["id"] and not self.history.is_seen(item_data["id"]):
-                        new_videos.append(item_data)
-
-                if not new_videos:
-                    logger.info(f"[Auto-Update] [{cat_name}] Semua video sudah pernah diunggah.")
-                    return
-
-                logger.info(f"[Auto-Update] [{cat_name}] Ditemukan {len(new_videos)} video baru. Mengunggah ke #{channel.name}...")
-
-                # Batasi maksimal 3 video per kategori setiap 30 menit agar feed channel rapi
-                videos_to_send = list(reversed(new_videos))[-3:]
-
-                for video in videos_to_send:
-                    embed = create_video_embed(video, category_info=cat_info, is_search=False)
-                    try:
-                        await channel.send(embed=embed)
-                        self.history.mark_as_seen(video["id"])
-                        logger.info(f"[Auto-Update] [{cat_name}] Berhasil posting: {video['title'][:40]} (ID: {video['id']})")
-                        await asyncio.sleep(2)  # Delay rate limit Discord
-                    except discord.Forbidden:
-                        logger.error(f"[Auto-Update] [{cat_name}] Tidak memiliki izin kirim pesan di channel #{channel.name}!")
-                        break
-                    except Exception as send_err:
-                        logger.error(f"[Auto-Update] [{cat_name}] Gagal mengirim embed: {send_err}")
-
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"[Auto-Update] [{cat_name}] Koneksi ke API Timeout. "
-                "(Catatan: Jika provider internet Anda memblokir domain dewasa, gunakan Cloudflare 1.1.1.1 / WARP / VPN)"
-            )
         except asyncio.CancelledError:
             logger.info(f"[Auto-Update] [{cat_name}] Task dibatalkan.")
         except Exception as e:
@@ -480,6 +498,7 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
             # Sesuaikan query pencarian jika dijalankan di channel spesifik
             query_str = f"{current_category['keywords'][0]} {keyword}" if current_category else keyword
 
+            # 1. Coba cari di Primary API (Eporner)
             search_endpoint = API_SEARCH_VIDEOS_URL.split("?")[0]
             params = {
                 "query": query_str,
@@ -488,41 +507,48 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
                 "format": "json"
             }
 
-            async with bot.session.get(search_endpoint, params=params, proxy=bot.proxy) as resp:
-                if resp.status != 200:
-                    error_embed = discord.Embed(
-                        title="❌ Gagal Menghubungi API",
-                        description=f"Server video merespons status `{resp.status}`. Coba beberapa saat lagi.",
-                        color=discord.Color.red()
-                    )
-                    await ctx.reply(embed=error_embed, mention_author=True)
-                    return
+            raw_results = []
+            try:
+                async with bot.session.get(search_endpoint, params=params, proxy=bot.proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        try:
+                            search_payload = await resp.json(content_type=None)
+                        except Exception:
+                            search_payload = json.loads(await resp.text())
+                        
+                        if isinstance(search_payload, list):
+                            raw_results = search_payload
+                        elif isinstance(search_payload, dict):
+                            raw_results = search_payload.get("videos") or search_payload.get("data") or search_payload.get("items") or []
+            except Exception as e:
+                logger.info(f"Primary search API gagal, mencoba fallback: {e}")
 
+            # 2. Jika Primary API tidak menghasilkan data, gunakan Fallback API (Redtube API)
+            if not raw_results:
                 try:
-                    search_payload = await resp.json(content_type=None)
-                except Exception:
-                    text_search = await resp.text()
-                    try:
-                        search_payload = json.loads(text_search)
-                    except Exception as json_err:
-                        logger.error(f"Gagal decode JSON pencarian. Status: {resp.status}, Snippet: {repr(text_search[:300])}")
-                        await ctx.reply("❌ Respons data dari API tidak valid.", mention_author=True)
-                        return
+                    fallback_url = "https://api.redtube.com/"
+                    fallback_params = {
+                        "data": "redtube.Videos.searchVideos",
+                        "output": "json",
+                        "search": query_str,
+                        "thumbsize": "big"
+                    }
+                    async with bot.session.get(fallback_url, params=fallback_params, proxy=bot.proxy, timeout=aiohttp.ClientTimeout(total=10)) as fb_resp:
+                        if fb_resp.status == 200:
+                            fb_payload = json.loads(await fb_resp.text())
+                            if isinstance(fb_payload, dict):
+                                raw_results = fb_payload.get("videos") or []
+                except Exception as fb_err:
+                    logger.error(f"Fallback search API gagal: {fb_err}")
 
-                raw_results = []
-                if isinstance(search_payload, list):
-                    raw_results = search_payload
-                elif isinstance(search_payload, dict):
-                    raw_results = search_payload.get("videos") or search_payload.get("data") or search_payload.get("items") or []
-
-                if not raw_results:
-                    not_found_embed = discord.Embed(
-                        title="🔍 Hasil Pencarian Tidak Ditemukan",
-                        description=f"Tidak ditemukan video dengan kata kunci: **{keyword}**.\nCobalah dengan kata kunci lain.",
-                        color=discord.Color.dark_gray()
-                    )
-                    await ctx.reply(embed=not_found_embed, mention_author=True)
-                    return
+            if not raw_results:
+                not_found_embed = discord.Embed(
+                    title="🔍 Hasil Pencarian Tidak Ditemukan",
+                    description=f"Tidak ditemukan video dengan kata kunci: **{keyword}**.\nCobalah dengan kata kunci lain.",
+                    color=discord.Color.dark_gray()
+                )
+                await ctx.reply(embed=not_found_embed, mention_author=True)
+                return
 
                 # Normalisasi hasil teratas (Top Result)
                 top_video = normalize_video_data(raw_results[0], default_category=current_category["name"] if current_category else None)
