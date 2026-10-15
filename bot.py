@@ -487,6 +487,9 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
         await ctx.reply(embed=help_embed, mention_author=True)
         return
 
+    # PENTING: Panggil defer() segera agar Discord tidak menampilkan error 3 detik 'The application did not respond'
+    await ctx.defer()
+
     keyword = keyword.strip()
 
     # Deteksi apakah user menjalankan perintah di dalam salah satu dari 3 channel kategori
@@ -498,87 +501,89 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
 
     logger.info(f"User {ctx.author} mencari '{keyword}' di #{ctx.channel.name} (Kategori: {current_category['name'] if current_category else 'Bebas'})")
 
-    async with ctx.typing():
+    try:
+        # Sesuaikan query pencarian jika dijalankan di channel spesifik
+        query_str = f"{current_category['keywords'][0]} {keyword}" if current_category else keyword
+
+        # 1. Coba cari di Primary API (Eporner)
+        search_endpoint = API_SEARCH_VIDEOS_URL.split("?")[0]
+        params = {
+            "query": query_str,
+            "per_page": 5,
+            "thumbsize": "big",
+            "format": "json"
+        }
+
+        raw_results = []
         try:
-            # Sesuaikan query pencarian jika dijalankan di channel spesifik
-            query_str = f"{current_category['keywords'][0]} {keyword}" if current_category else keyword
-
-            # 1. Coba cari di Primary API (Eporner)
-            search_endpoint = API_SEARCH_VIDEOS_URL.split("?")[0]
-            params = {
-                "query": query_str,
-                "per_page": 5,
-                "thumbsize": "big",
-                "format": "json"
-            }
-
-            raw_results = []
-            try:
-                async with bot.session.get(search_endpoint, params=params, proxy=bot.proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status == 200:
-                        try:
-                            search_payload = await resp.json(content_type=None)
-                        except Exception:
-                            search_payload = json.loads(await resp.text())
-                        
-                        if isinstance(search_payload, list):
-                            raw_results = search_payload
-                        elif isinstance(search_payload, dict):
-                            raw_results = search_payload.get("videos") or search_payload.get("data") or search_payload.get("items") or []
-            except Exception as e:
-                logger.info(f"Primary search API gagal, mencoba fallback: {e}")
-
-            # 2. Jika Primary API tidak menghasilkan data, gunakan Fallback API (Redtube API)
-            if not raw_results:
-                try:
-                    fallback_url = "https://api.redtube.com/"
-                    fallback_params = {
-                        "data": "redtube.Videos.searchVideos",
-                        "output": "json",
-                        "search": query_str,
-                        "thumbsize": "big"
-                    }
-                    async with bot.session.get(fallback_url, params=fallback_params, proxy=bot.proxy, timeout=aiohttp.ClientTimeout(total=10)) as fb_resp:
-                        if fb_resp.status == 200:
-                            fb_payload = json.loads(await fb_resp.text())
-                            if isinstance(fb_payload, dict):
-                                raw_results = fb_payload.get("videos") or []
-                except Exception as fb_err:
-                    logger.error(f"Fallback search API gagal: {fb_err}")
-
-            if not raw_results:
-                not_found_embed = discord.Embed(
-                    title="🔍 Hasil Pencarian Tidak Ditemukan",
-                    description=f"Tidak ditemukan video dengan kata kunci: **{keyword}**.\nCobalah dengan kata kunci lain.",
-                    color=discord.Color.dark_gray()
-                )
-                await ctx.reply(embed=not_found_embed, mention_author=True)
-                return
-
-                # Mengirim pesan dengan URL langsung agar Discord me-render player video yang bisa langsung di-play di Discord
-                search_caption = (
-                    f"🔞 **{top_video['title']}**\n"
-                    f"⏱️ **Durasi:** `{top_video['duration']}` | 🏷️ **Tag:** `{top_video['tags']}`\n"
-                    f"{top_video['url']}"
-                )
-
-                # Jika ada video tambahan lainnya, cantumkan di bawahnya
-                additional_links = []
-                for idx, extra_item in enumerate(raw_results[1:4], start=2):
-                    extra_data = normalize_video_data(extra_item)
-                    if extra_data.get("url"):
-                        additional_links.append(f"**{idx}.** [{extra_data['title'][:40]}]({extra_data['url']}) (`{extra_data['duration']}`)")
-
-                if additional_links:
-                    search_caption += "\n\n**📚 Video Serupa Lainnya:**\n" + "\n".join(additional_links)
-
-                await ctx.reply(content=search_caption, mention_author=True)
-
-        except asyncio.TimeoutError:
-            await ctx.reply("⏱️ Permintaan ke API melebihi batas waktu (Timeout). Silakan periksa koneksi internet.", mention_author=True)
+            async with bot.session.get(search_endpoint, params=params, proxy=bot.proxy, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status == 200:
+                    try:
+                        search_payload = await resp.json(content_type=None)
+                    except Exception:
+                        search_payload = json.loads(await resp.text())
+                    
+                    if isinstance(search_payload, list):
+                        raw_results = search_payload
+                    elif isinstance(search_payload, dict):
+                        raw_results = search_payload.get("videos") or search_payload.get("data") or search_payload.get("items") or []
         except Exception as e:
-            logger.error(f"Error pada perintah !cari: {e}", exc_info=True)
-            await ctx.reply("⚠️ Terjadi kesalahan internal saat mencari video.", mention_author=True)
+            logger.info(f"Primary search API gagal/timeout, mencoba fallback: {e}")
+
+        # 2. Jika Primary API tidak menghasilkan data, gunakan Fallback API (Redtube API)
+        if not raw_results:
+            try:
+                fallback_url = "https://api.redtube.com/"
+                fallback_params = {
+                    "data": "redtube.Videos.searchVideos",
+                    "output": "json",
+                    "search": query_str,
+                    "thumbsize": "big"
+                }
+                async with bot.session.get(fallback_url, params=fallback_params, proxy=bot.proxy, timeout=aiohttp.ClientTimeout(total=8)) as fb_resp:
+                    if fb_resp.status == 200:
+                        fb_payload = json.loads(await fb_resp.text())
+                        if isinstance(fb_payload, dict):
+                            raw_results = fb_payload.get("videos") or []
+            except Exception as fb_err:
+                logger.error(f"Fallback search API gagal: {fb_err}")
+
+        if not raw_results:
+            not_found_embed = discord.Embed(
+                title="🔍 Hasil Pencarian Tidak Ditemukan",
+                description=f"Tidak ditemukan video dengan kata kunci: **{keyword}**.\nCobalah dengan kata kunci lain.",
+                color=discord.Color.dark_gray()
+            )
+            await ctx.send(embed=not_found_embed)
+            return
+
+        # Normalisasi hasil teratas (Top Result)
+        top_video = normalize_video_data(raw_results[0], default_category=current_category["name"] if current_category else None)
+
+        # Mengirim pesan dengan URL langsung agar Discord me-render player video yang bisa langsung di-play di Discord
+        search_caption = (
+            f"🔞 **{top_video['title']}**\n"
+            f"⏱️ **Durasi:** `{top_video['duration']}` | 🏷️ **Tag:** `{top_video['tags']}`\n"
+            f"{top_video['url']}"
+        )
+
+        # Jika ada video tambahan lainnya, cantumkan di bawahnya
+        additional_links = []
+        for idx, extra_item in enumerate(raw_results[1:4], start=2):
+            extra_data = normalize_video_data(extra_item)
+            if extra_data.get("url"):
+                additional_links.append(f"**{idx}.** [{extra_data['title'][:40]}]({extra_data['url']}) (`{extra_data['duration']}`)")
+
+        if additional_links:
+            search_caption += "\n\n**📚 Video Serupa Lainnya:**\n" + "\n".join(additional_links)
+
+        await ctx.send(content=search_caption)
+
+    except asyncio.TimeoutError:
+        await ctx.send("⏱️ Permintaan ke API melebihi batas waktu (Timeout). Silakan periksa koneksi internet.")
+    except Exception as e:
+        logger.error(f"Error pada perintah /cari: {e}", exc_info=True)
+        await ctx.send("⚠️ Terjadi kesalahan internal saat mencari video.")
 
 
 # ==============================================================================
@@ -595,6 +600,8 @@ async def status_channel(ctx: commands.Context) -> None:
     if not is_nsfw:
         await ctx.reply("⛔ Perintah ini hanya bisa dicek di channel NSFW.", mention_author=True)
         return
+
+    await ctx.defer()
 
     embed = discord.Embed(
         title="📊 Status Konfigurasi Channel Kategori",
