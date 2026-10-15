@@ -382,6 +382,22 @@ class MultiChannelAdultBot(commands.Bot):
 
         return []
 
+# ==============================================================================
+# DISCORD UI VIEW: TOMBOL INTERAKTIF TONTON VIDEO
+# ==============================================================================
+class VideoActionView(discord.ui.View):
+    """Membuat tombol interaktif Discord yang bisa langsung diklik untuk menonton."""
+    def __init__(self, video_url: str):
+        super().__init__(timeout=None)
+        if video_url and video_url.startswith("http"):
+            self.add_item(discord.ui.Button(
+                label="▶️ Tonton Video",
+                url=video_url,
+                style=discord.ButtonStyle.link,
+                emoji="🔞"
+            ))
+
+
     async def _process_category_update(self, channel: discord.abc.Messageable, cat_info: Dict[str, Any]) -> None:
         """Mengambil data video terbaru dari API untuk kategori tertentu dan mengirimkannya."""
         cat_name = cat_info["name"]
@@ -411,16 +427,12 @@ class MultiChannelAdultBot(commands.Bot):
             videos_to_send = list(reversed(new_videos))[-3:]
 
             for video in videos_to_send:
-                # Format pesan langsung dengan URL agar Discord otomatis mengaktifkan Video Player bawaan (bisa di-play langsung)
-                video_caption = (
-                    f"🔞 **{cat_info['emoji']} [{cat_info['name']}] {video['title']}**\n"
-                    f"⏱️ **Durasi:** `{video['duration']}` | 🏷️ **Tag:** `{video['tags']}`\n"
-                    f"{video['url']}"
-                )
+                embed = create_video_embed(video, category_info=cat_info, is_search=False)
+                view = VideoActionView(video["url"])
                 try:
-                    await channel.send(content=video_caption)
+                    await channel.send(embed=embed, view=view)
                     self.history.mark_as_seen(video["id"])
-                    logger.info(f"[Auto-Update] [{cat_name}] Berhasil posting video player: {video['title'][:40]} (ID: {video['id']})")
+                    logger.info(f"[Auto-Update] [{cat_name}] Berhasil posting video: {video['title'][:40]} (ID: {video['id']})")
                     await asyncio.sleep(2)  # Delay rate limit Discord
                 except discord.Forbidden:
                     logger.error(f"[Auto-Update] [{cat_name}] Tidak memiliki izin kirim pesan di channel #{channel.name}!")
@@ -559,15 +571,10 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
 
         # Normalisasi hasil teratas (Top Result)
         top_video = normalize_video_data(raw_results[0], default_category=current_category["name"] if current_category else None)
+        embed = create_video_embed(top_video, category_info=current_category, is_search=True)
+        view = VideoActionView(top_video["url"])
 
-        # Mengirim pesan dengan URL langsung agar Discord me-render player video yang bisa langsung di-play di Discord
-        search_caption = (
-            f"🔞 **{top_video['title']}**\n"
-            f"⏱️ **Durasi:** `{top_video['duration']}` | 🏷️ **Tag:** `{top_video['tags']}`\n"
-            f"{top_video['url']}"
-        )
-
-        # Jika ada video tambahan lainnya, cantumkan di bawahnya
+        # Jika ada video tambahan lainnya, cantumkan di embed
         additional_links = []
         for idx, extra_item in enumerate(raw_results[1:4], start=2):
             extra_data = normalize_video_data(extra_item)
@@ -575,9 +582,13 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
                 additional_links.append(f"**{idx}.** [{extra_data['title'][:40]}]({extra_data['url']}) (`{extra_data['duration']}`)")
 
         if additional_links:
-            search_caption += "\n\n**📚 Video Serupa Lainnya:**\n" + "\n".join(additional_links)
+            embed.add_field(
+                name="📚 Video Serupa Lainnya",
+                value="\n".join(additional_links),
+                inline=False
+            )
 
-        await ctx.send(content=search_caption)
+        await ctx.send(embed=embed, view=view)
 
     except asyncio.TimeoutError:
         await ctx.send("⏱️ Permintaan ke API melebihi batas waktu (Timeout). Silakan periksa koneksi internet.")
