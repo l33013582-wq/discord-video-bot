@@ -1,8 +1,10 @@
 import os
 import re
 import json
+import random
 import logging
 import asyncio
+import urllib.parse
 from typing import Optional, List, Dict, Any, Set
 from datetime import datetime, timezone
 
@@ -48,27 +50,41 @@ CATEGORIES: Dict[str, Dict[str, Any]] = {
         "name": "Jepang (JAV / Japanese)",
         "emoji": "🇯🇵",
         "channel_id": parse_channel_id("CHANNEL_JEPANG_ID"),
-        "api_url": os.getenv("API_JEPANG_URL", "https://www.xvideos.com/?k=japanese"),
+        "api_url": os.getenv("API_JEPANG_URL", "https://www.xvideos.com/?k=japanese&sort=uploaddate"),
         "color": discord.Color.from_rgb(255, 75, 145),  # Sakura Crimson
-        "keywords": ["japanese", "jav", "japan"]
+        "keywords": [
+            "japanese", "jav uncensored", "japanese sub indo", "japanese massage",
+            "japanese schoolgirl", "japanese milf", "japanese nurse", "tokyo jav",
+            "japanese wife", "japanese cosplay", "japanese amateur", "jav hd",
+            "japanese creampie", "japanese cheating", "japanese sister", "japanese office"
+        ]
     },
     "asia": {
         "key": "asia",
         "name": "Asia (Non-Jepang)",
         "emoji": "🌏",
         "channel_id": parse_channel_id("CHANNEL_ASIA_ID"),
-        "api_url": os.getenv("API_ASIA_URL", "https://www.xvideos.com/?k=asian"),
+        "api_url": os.getenv("API_ASIA_URL", "https://www.xvideos.com/?k=asian&sort=uploaddate"),
         "color": discord.Color.from_rgb(255, 140, 0),   # Warm Amber
-        "keywords": ["asian", "korean", "chinese", "indonesian"]
+        "keywords": [
+            "asian", "indonesian viral", "korean bj", "indo bokep", "chinese amateur",
+            "thai massage", "filipina viral", "vietnamese girl", "asian college",
+            "asian milf", "hijab indo", "korean dance", "indo pemersatu bangsa",
+            "asian creampie", "malay viral", "indo mahasiswi"
+        ]
     },
     "western": {
         "key": "western",
         "name": "Western (Barat / Caucasian)",
         "emoji": "🌍",
         "channel_id": parse_channel_id("CHANNEL_WESTERN_ID"),
-        "api_url": os.getenv("API_WESTERN_URL", "https://www.xvideos.com/?k=western"),
+        "api_url": os.getenv("API_WESTERN_URL", "https://www.xvideos.com/?k=western&sort=uploaddate"),
         "color": discord.Color.from_rgb(30, 144, 255),  # Dodger Blue
-        "keywords": ["western", "american", "european", "caucasian"]
+        "keywords": [
+            "western", "blonde teen", "american milf", "stepmom", "latina big ass",
+            "european amateur", "brunette college", "czech massage", "hardcore western",
+            "french babe", "blonde rough", "stepdaughter", "western creampie", "office secretary"
+        ]
     }
 }
 
@@ -640,18 +656,27 @@ class MultiChannelAdultBot(commands.Bot):
         return []
 
     async def _process_category_update(self, channel: discord.abc.Messageable, cat_info: Dict[str, Any]) -> None:
-        """Mengambil data video terbaru dari API untuk kategori tertentu dan mengirimkannya."""
+        """Mengambil data video terbaru dan bervariasi dari API untuk kategori tertentu dan mengirimkannya."""
         cat_name = cat_info["name"]
-        cat_query = cat_info["keywords"][0]
-        api_url = cat_info["api_url"]
+        
+        # 1. Pilih keyword sub-genre secara acak agar konten selalu bervariasi setiap siklus
+        sub_query = random.choice(cat_info["keywords"])
+        
+        # 2. Acak metode sorting (fokus video baru upload / uploaddate) dan pagination (halaman 0-3)
+        sort_mode = random.choices(["uploaddate", "rating", "views"], weights=[0.80, 0.12, 0.08], k=1)[0]
+        page_num = random.randint(0, 3)
+        
+        # Buat URL dinamis ke scraper XVideos
+        xv_dynamic_url = f"https://www.xvideos.com/?k={urllib.parse.quote_plus(sub_query)}&sort={sort_mode}&p={page_num}"
+        logger.info(f"[Auto-Update] [{cat_name}] Mengambil feed segar (Query: '{sub_query}', Sort: {sort_mode}, Page: {page_num})...")
 
         try:
-            raw_videos = await self._fetch_videos_with_fallback(api_url, cat_query, default_category=cat_name)
+            raw_videos = await self._fetch_videos_with_fallback(xv_dynamic_url, sub_query, default_category=cat_name)
             if not raw_videos:
                 logger.warning(f"[Auto-Update] [{cat_name}] Tidak ada video ditemukan dari API.")
                 return
 
-            # Filter video baru (deduplikasi ID)
+            # Filter video baru (deduplikasi ID agar tidak pernah mengirim video yang sama)
             new_videos = []
             for raw_item in raw_videos:
                 item_data = normalize_video_data(raw_item, default_category=cat_info["name"])
@@ -659,13 +684,14 @@ class MultiChannelAdultBot(commands.Bot):
                     new_videos.append(item_data)
 
             if not new_videos:
-                logger.info(f"[Auto-Update] [{cat_name}] Semua video sudah pernah diunggah.")
+                logger.info(f"[Auto-Update] [{cat_name}] Semua video pada query ini sudah pernah diunggah. Mencari variasi berikutnya...")
                 return
 
             logger.info(f"[Auto-Update] [{cat_name}] Ditemukan {len(new_videos)} video baru. Mengunggah ke #{channel.name}...")
 
-            # Batasi maksimal 3 video per kategori setiap 30 menit agar feed channel rapi
-            videos_to_send = list(reversed(new_videos))[-3:]
+            # Ambil maksimal 3 video secara acak dari kumpulan video baru
+            count_to_send = min(3, len(new_videos))
+            videos_to_send = random.sample(new_videos, count_to_send)
 
             for video in videos_to_send:
                 direct_mp4 = await extract_direct_mp4_url(self.session, video["url"], proxy=self.proxy)
