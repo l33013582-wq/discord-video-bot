@@ -326,7 +326,7 @@ class MultiChannelAdultBot(commands.Bot):
         """Inisialisasi sesi HTTP asinkron, sinkronisasi Slash Command, dan memulai task."""
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json"
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json,*/*;q=0.8"
         }
         if API_KEY:
             headers["Authorization"] = f"Bearer {API_KEY}"
@@ -534,7 +534,10 @@ bot = MultiChannelAdultBot()
 @discord.app_commands.describe(keyword="Kata kunci video yang ingin dicari (contoh: cosplay, blondie)")
 async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) -> None:
     """Perintah pencarian video. Menyesuaikan kategori otomatis jika dijalankan di channel spesifik."""
-    # 1. Validasi Keamanan: Wajib berada di Channel NSFW
+    # 1. Panggil defer() segera di baris pertama agar Discord interaksi tidak pernah timeout 3 detik
+    await ctx.defer()
+
+    # 2. Validasi Keamanan: Wajib berada di Channel NSFW
     is_nsfw = getattr(ctx.channel, "is_nsfw", lambda: False)()
     if not is_nsfw:
         warning_embed = discord.Embed(
@@ -548,10 +551,10 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
             color=discord.Color.red()
         )
         warning_embed.set_footer(text="Discord Safety & Age-Restricted Policy")
-        await ctx.reply(embed=warning_embed, mention_author=True)
+        await ctx.send(embed=warning_embed)
         return
 
-    # 2. Validasi Kata Kunci
+    # 3. Validasi Kata Kunci
     if not keyword or not keyword.strip():
         help_embed = discord.Embed(
             title="ℹ️ Cara Menggunakan Perintah /cari",
@@ -563,11 +566,8 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
             ),
             color=discord.Color.gold()
         )
-        await ctx.reply(embed=help_embed, mention_author=True)
+        await ctx.send(embed=help_embed)
         return
-
-    # PENTING: Panggil defer() segera agar Discord tidak menampilkan error 3 detik 'The application did not respond'
-    await ctx.defer()
 
     keyword = keyword.strip()
 
@@ -587,8 +587,7 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
         # 1. Prioritas Pertama: Cari langsung ke XVideos
         raw_results = []
         try:
-            xv_search_url = f"https://www.xvideos.com/?k={query_str}"
-            async with bot.session.get(xv_search_url, proxy=bot.proxy, timeout=aiohttp.ClientTimeout(total=8)) as xv_resp:
+            async with bot.session.get("https://www.xvideos.com/", params={"k": query_str}, proxy=bot.proxy, timeout=aiohttp.ClientTimeout(total=8)) as xv_resp:
                 if xv_resp.status == 200:
                     xv_html = await xv_resp.text()
                     xv_results = parse_xvideos_html(xv_html, default_category=current_category["name"] if current_category else None)
@@ -662,12 +661,12 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
 )
 async def status_channel(ctx: commands.Context) -> None:
     """Mengecek status dan ID ketiga channel yang terhubung ke bot."""
+    await ctx.defer()
+
     is_nsfw = getattr(ctx.channel, "is_nsfw", lambda: False)()
     if not is_nsfw:
-        await ctx.reply("⛔ Perintah ini hanya bisa dicek di channel NSFW.", mention_author=True)
+        await ctx.send("⛔ Perintah ini hanya bisa dicek di channel NSFW.")
         return
-
-    await ctx.defer()
 
     embed = discord.Embed(
         title="📊 Status Konfigurasi Channel Kategori",
@@ -690,7 +689,7 @@ async def status_channel(ctx: commands.Context) -> None:
         )
 
     embed.set_footer(text="Auto-Update Interval: Setiap 30 Menit")
-    await ctx.reply(embed=embed, mention_author=True)
+    await ctx.send(embed=embed)
 
 
 # ==============================================================================
