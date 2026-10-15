@@ -480,6 +480,7 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
             # Sesuaikan query pencarian jika dijalankan di channel spesifik
             query_str = f"{current_category['keywords'][0]} {keyword}" if current_category else keyword
 
+            search_endpoint = API_SEARCH_VIDEOS_URL.split("?")[0]
             params = {
                 "query": query_str,
                 "per_page": 5,
@@ -487,7 +488,7 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
                 "format": "json"
             }
 
-            async with bot.session.get(API_SEARCH_VIDEOS_URL, params=params, proxy=bot.proxy) as resp:
+            async with bot.session.get(search_endpoint, params=params, proxy=bot.proxy) as resp:
                 if resp.status != 200:
                     error_embed = discord.Embed(
                         title="❌ Gagal Menghubungi API",
