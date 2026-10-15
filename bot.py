@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import logging
 import asyncio
@@ -127,12 +128,6 @@ def parse_xvideos_html(html_text: str, default_category: Optional[str] = None) -
     blocks = soup.find_all("div", class_="thumb-block")
     for block in blocks:
         try:
-            # Dapatkan ID video
-            video_id = block.get("id", "").replace("video_", "").strip()
-            if not video_id:
-                data_id = block.get("data-id")
-                video_id = str(data_id) if data_id else None
-
             # Dapatkan elemen judul dan link video
             title_p = block.find("p", class_="title")
             if not title_p:
@@ -143,9 +138,25 @@ def parse_xvideos_html(html_text: str, default_category: Optional[str] = None) -
 
             title = a_tag.get("title") or a_tag.text.strip()
             href = a_tag.get("href", "")
-            if not href:
+            if not href or href == "#":
                 continue
             url = f"https://www.xvideos.com{href}" if href.startswith("/") else href
+
+            # Ekstrak ID video unik dari href (/video12345/ atau /video.abcde/)
+            video_id = None
+            id_match = re.search(r'/video[._]?([a-zA-Z0-9]+)', href)
+            if id_match:
+                video_id = id_match.group(1)
+            elif block.get("data-id") and str(block.get("data-id")).strip().isdigit():
+                video_id = str(block.get("data-id")).strip()
+            elif block.get("id") and str(block.get("id")).startswith("video_"):
+                video_id = str(block.get("id")).replace("video_", "").strip()
+            else:
+                video_id = url
+
+            # Abaikan ID generik jika tertangkap tombol UI
+            if video_id in ["anc-tst-first_video-btn", "first_video-btn", "btn"]:
+                video_id = url
 
             # Dapatkan poster gambar / thumbnail
             img_tag = block.find("img")
@@ -158,7 +169,7 @@ def parse_xvideos_html(html_text: str, default_category: Optional[str] = None) -
             duration = duration_span.text.strip() if duration_span else "N/A"
 
             results.append({
-                "id": str(video_id) if video_id else url,
+                "id": str(video_id),
                 "title": str(title),
                 "url": str(url),
                 "thumbnail": str(thumbnail) if thumbnail else None,
