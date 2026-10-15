@@ -411,17 +411,22 @@ class MultiChannelAdultBot(commands.Bot):
             videos_to_send = list(reversed(new_videos))[-3:]
 
             for video in videos_to_send:
-                embed = create_video_embed(video, category_info=cat_info, is_search=False)
+                # Format pesan langsung dengan URL agar Discord otomatis mengaktifkan Video Player bawaan (bisa di-play langsung)
+                video_caption = (
+                    f"🔞 **{cat_info['emoji']} [{cat_info['name']}] {video['title']}**\n"
+                    f"⏱️ **Durasi:** `{video['duration']}` | 🏷️ **Tag:** `{video['tags']}`\n"
+                    f"{video['url']}"
+                )
                 try:
-                    await channel.send(embed=embed)
+                    await channel.send(content=video_caption)
                     self.history.mark_as_seen(video["id"])
-                    logger.info(f"[Auto-Update] [{cat_name}] Berhasil posting: {video['title'][:40]} (ID: {video['id']})")
+                    logger.info(f"[Auto-Update] [{cat_name}] Berhasil posting video player: {video['title'][:40]} (ID: {video['id']})")
                     await asyncio.sleep(2)  # Delay rate limit Discord
                 except discord.Forbidden:
                     logger.error(f"[Auto-Update] [{cat_name}] Tidak memiliki izin kirim pesan di channel #{channel.name}!")
                     break
                 except Exception as send_err:
-                    logger.error(f"[Auto-Update] [{cat_name}] Gagal mengirim embed: {send_err}")
+                    logger.error(f"[Auto-Update] [{cat_name}] Gagal mengirim video: {send_err}")
 
         except asyncio.CancelledError:
             logger.info(f"[Auto-Update] [{cat_name}] Task dibatalkan.")
@@ -550,11 +555,14 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
                 await ctx.reply(embed=not_found_embed, mention_author=True)
                 return
 
-                # Normalisasi hasil teratas (Top Result)
-                top_video = normalize_video_data(raw_results[0], default_category=current_category["name"] if current_category else None)
-                embed = create_video_embed(top_video, category_info=current_category, is_search=True)
+                # Mengirim pesan dengan URL langsung agar Discord me-render player video yang bisa langsung di-play di Discord
+                search_caption = (
+                    f"🔞 **{top_video['title']}**\n"
+                    f"⏱️ **Durasi:** `{top_video['duration']}` | 🏷️ **Tag:** `{top_video['tags']}`\n"
+                    f"{top_video['url']}"
+                )
 
-                # Lampirkan video tambahan jika ada
+                # Jika ada video tambahan lainnya, cantumkan di bawahnya
                 additional_links = []
                 for idx, extra_item in enumerate(raw_results[1:4], start=2):
                     extra_data = normalize_video_data(extra_item)
@@ -562,18 +570,9 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
                         additional_links.append(f"**{idx}.** [{extra_data['title'][:40]}]({extra_data['url']}) (`{extra_data['duration']}`)")
 
                 if additional_links:
-                    embed.add_field(
-                        name="📚 Video Terkait Lainnya",
-                        value="\n".join(additional_links),
-                        inline=False
-                    )
+                    search_caption += "\n\n**📚 Video Serupa Lainnya:**\n" + "\n".join(additional_links)
 
-                embed.set_author(
-                    name=f"Hasil Pencarian untuk: '{keyword}'",
-                    icon_url=ctx.author.display_avatar.url if ctx.author.display_avatar else None
-                )
-
-                await ctx.reply(embed=embed, mention_author=True)
+                await ctx.reply(content=search_caption, mention_author=True)
 
         except asyncio.TimeoutError:
             await ctx.reply("⏱️ Permintaan ke API melebihi batas waktu (Timeout). Silakan periksa koneksi internet.", mention_author=True)
