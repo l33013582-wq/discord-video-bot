@@ -117,7 +117,144 @@ class VideoHistoryManager:
 
 
 # ==============================================================================
-# 4. HELPER PARSER DATA API & HTML SCRAPER (XVIDEOS / EPORNER / REDTUBE)
+# 4. KAMUS PENERJEMAHAN ISTILAH / KATEGORI BAHASA INDONESIA KE TAG INGGRIS
+# ==============================================================================
+INDONESIAN_TRANSLATION_MAP: Dict[str, str] = {
+    # Wilayah & Ras / Kategori Utama
+    "jepang": "japanese",
+    "jav": "jav japanese",
+    "asia": "asian",
+    "barat": "western",
+    "bule": "western",
+    "korea": "korean",
+    "cina": "chinese",
+    "china": "chinese",
+    "indo": "indonesian",
+    "indonesia": "indonesian",
+    "lokal": "indonesian",
+
+    # Usia / Karakter / Peran
+    "tante": "milf",
+    "stw": "mature milf",
+    "ibu tiri": "stepmom",
+    "mama tiri": "stepmom",
+    "ibu": "mom",
+    "mama": "mom",
+    "anak tiri": "stepdaughter",
+    "saudara tiri": "stepsister",
+    "kakak tiri": "stepsister",
+    "adik tiri": "stepsister",
+    "sekolah": "schoolgirl",
+    "siswi": "schoolgirl",
+    "anak sekolah": "schoolgirl",
+    "sma": "schoolgirl",
+    "smp": "schoolgirl teen",
+    "seragam": "uniform schoolgirl",
+    "remaja": "teen",
+    "gadis": "teen",
+    "perawan": "virgin",
+    "cewek": "girl",
+    "cewe": "girl",
+    "wanita": "woman",
+    "mahasiswi": "college student",
+    "kuliah": "college",
+
+    # Pekerjaan / Profesi
+    "perawat": "nurse",
+    "suster": "nurse",
+    "guru": "teacher",
+    "dosen": "teacher",
+    "kantor": "office",
+    "sekretaris": "secretary",
+    "bos": "boss",
+    "pelayan": "maid",
+    "pembantu": "maid",
+    "polisi": "police",
+    "pramugari": "flight attendant",
+    "model": "model",
+    "terapis": "massage therapist",
+    "pijat": "massage",
+    "urut": "massage",
+
+    # Lokasi / Skenario
+    "kamar": "room",
+    "hotel": "hotel",
+    "mandi": "shower bath",
+    "toilet": "bathroom",
+    "dapur": "kitchen",
+    "mobil": "car",
+    "pantai": "beach",
+    "kolam renang": "pool",
+    "kolam": "pool",
+    "taman": "outdoor",
+    "kantoran": "office",
+    "rumah": "home",
+    "tetangga": "neighbor",
+    "teman": "friend",
+    "sahabat": "friend",
+    "selingkuh": "cheating",
+    "tidur": "sleeping",
+    "sembunyi": "hidden",
+    "intip": "spy",
+    "ketahuan": "caught",
+    "terjebak": "stuck",
+
+    # Ciri Fisik
+    "toket besar": "big tits",
+    "tete besar": "big tits",
+    "payudara besar": "big tits",
+    "montok": "chubby bbw",
+    "pantat besar": "big ass",
+    "pantat": "ass",
+    "kacamata": "glasses",
+    "mulus": "smooth",
+    "pirang": "blonde",
+    "hitam": "ebony",
+    "kulit putih": "pale",
+    "cantik": "beautiful",
+    "imut": "cute",
+    "rambut pendek": "short hair",
+    "gemuk": "chubby bbw",
+
+    # Pakaian & Aksesori
+    "jilbab": "hijab",
+    "kerudung": "hijab",
+    "kebaya": "kebaya indonesian",
+    "stoking": "stockings",
+    "lingerie": "lingerie",
+    "rok": "skirt",
+    "bikini": "bikini",
+    "kostum": "cosplay",
+
+    # Gaya & Aksi
+    "kasar": "hardcore",
+    "lembut": "romantic",
+    "kencing": "pissing",
+    "goyang": "riding",
+    "kocok": "handjob",
+    "isap": "blowjob",
+    "oral": "blowjob",
+    "gengbang": "gangbang",
+    "trio": "threesome",
+    "rame-rame": "group sex",
+    "kencan": "date",
+    "mabuk": "drunk",
+    "paksa": "rough",
+}
+
+def translate_indonesian_query(query: str) -> str:
+    """Menerjemahkan kata kunci pencarian dari Bahasa Indonesia ke istilah tag bahasa Inggris untuk XVideos."""
+    if not query:
+        return ""
+    translated = query.lower()
+    for id_phrase, en_term in sorted(INDONESIAN_TRANSLATION_MAP.items(), key=lambda x: len(x[0]), reverse=True):
+        pattern = r"\b" + re.escape(id_phrase) + r"\b"
+        translated = re.sub(pattern, en_term, translated)
+    return " ".join(translated.split())
+
+
+# ==============================================================================
+# 5. HELPER PARSER DATA API & HTML SCRAPER (XVIDEOS / EPORNER / REDTUBE)
 # ==============================================================================
 def parse_xvideos_html(html_text: str, default_category: Optional[str] = None) -> List[Dict[str, Any]]:
     """Mengekstrak daftar video langsung dari halaman pencarian atau kategori XVideos."""
@@ -537,14 +674,33 @@ bot = MultiChannelAdultBot()
 # ==============================================================================
 # 6. PERINTAH INTERAKTIF PENCARIAN (/cari [kata_kunci])
 # ==============================================================================
+# ==============================================================================
+# 7. PERINTAH INTERAKTIF PENCARIAN (/cari [kata_kunci] [kategori])
+# ==============================================================================
 @bot.hybrid_command(
     name="cari",
     aliases=["search", "find"],
     description="Mencari video dewasa berdasarkan kata kunci (Wajib di channel NSFW)"
 )
-@discord.app_commands.describe(keyword="Kata kunci video yang ingin dicari (contoh: cosplay, blondie)")
-async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) -> None:
-    """Perintah pencarian video. Menyesuaikan kategori otomatis jika dijalankan di channel spesifik."""
+@discord.app_commands.describe(
+    keyword="Kata kunci video dalam Bahasa Indonesia atau Inggris (contoh: tante, perawat, cosplay, siswi)",
+    kategori="Pilihan kategori wilayah video (Jepang, Asia, Barat, atau Semua Kategori)"
+)
+@discord.app_commands.choices(
+    kategori=[
+        discord.app_commands.Choice(name="🇯🇵 Jepang (JAV)", value="jepang"),
+        discord.app_commands.Choice(name="🌏 Asia (Non-Jepang)", value="asia"),
+        discord.app_commands.Choice(name="🌍 Barat (Western / Bule)", value="western"),
+        discord.app_commands.Choice(name="🌐 Bebas / Semua Kategori", value="semua"),
+    ]
+)
+async def cari_video(
+    ctx: commands.Context,
+    kategori: Optional[discord.app_commands.Choice[str]] = None,
+    *,
+    keyword: Optional[str] = None
+) -> None:
+    """Perintah pencarian video. Menyesuaikan kategori otomatis jika dijalankan di channel spesifik atau melalui pilihan kategori."""
     # 1. Panggil defer() segera di baris pertama agar Discord interaksi tidak pernah timeout 3 detik
     await ctx.defer()
 
@@ -570,10 +726,15 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
         help_embed = discord.Embed(
             title="ℹ️ Cara Menggunakan Perintah /cari",
             description=(
-                "Ketik kata kunci video yang ingin Anda cari.\n\n"
-                "**Format:** `/cari [kata_kunci]`\n"
-                "**Contoh:** `/cari cosplay` atau `/cari blondie`\n\n"
-                "💡 *Tips: Jika dijalankan di channel khusus (Jepang / Asia / Western), hasil pencarian akan ditandai dengan kategori tersebut.*"
+                "Ketik kata kunci video yang ingin Anda cari. Anda dapat menggunakan **Bahasa Indonesia** maupun **Bahasa Inggris**!\n\n"
+                "**Format:** `/cari keyword: [kata_kunci] [kategori (opsional)]`\n\n"
+                "**Contoh Penggunaan Bahasa Indonesia:**\n"
+                "• `/cari keyword: tante perawat`\n"
+                "• `/cari keyword: cosplay kategori: Jepang (JAV)`\n"
+                "• `/cari keyword: anak sekolah selingkuh`\n"
+                "• `/cari keyword: bule toket besar`\n"
+                "• `/cari keyword: jilbab indo`\n\n"
+                "💡 *Tips: Kategori otomatis mendeteksi channel Anda (#jav = Jepang, #asia = Asia, #western = Barat) atau dari opsi dropdown kategori.*"
             ),
             color=discord.Color.gold()
         )
@@ -582,19 +743,52 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
 
     keyword = keyword.strip()
 
-    # Deteksi apakah user menjalankan perintah di dalam salah satu dari 3 channel kategori
-    current_category = None
+    # Ekstraksi pilihan kategori dari opsi command dropdown
+    chosen_cat_key = None
+    if kategori:
+        chosen_cat_key = kategori.value if isinstance(kategori, discord.app_commands.Choice) else str(kategori).lower()
+        if chosen_cat_key == "semua":
+            chosen_cat_key = None
+
+    # Cek kategori dari channel tempat command dijalankan
+    channel_cat_key = None
     for cat_key, cat_data in CATEGORIES.items():
         if cat_data["channel_id"] == ctx.channel.id:
-            current_category = cat_data
+            channel_cat_key = cat_key
             break
 
-    logger.info(f"User {ctx.author} mencari '{keyword}' di #{ctx.channel.name} (Kategori: {current_category['name'] if current_category else 'Bebas'})")
+    # Prioritas penentuan kategori:
+    # 1. Pilihan dropdown kategori (jika user memilih)
+    # 2. Channel tempat command dijalankan (#jav -> Jepang, #asia -> Asia, #western -> Barat)
+    # 3. Deteksi otomatis dari kata kunci bahasa Indonesia (jepang, barat, bule, asia, indo, dll)
+    detected_cat_key = chosen_cat_key or channel_cat_key
+    kw_lower = keyword.lower()
+    if not detected_cat_key:
+        if any(w in kw_lower for w in ["jepang", "jav"]):
+            detected_cat_key = "jepang"
+        elif any(w in kw_lower for w in ["barat", "bule", "western"]):
+            detected_cat_key = "western"
+        elif any(w in kw_lower for w in ["asia", "indo", "korea", "cina", "china"]):
+            detected_cat_key = "asia"
+
+    current_category = CATEGORIES.get(detected_cat_key) if detected_cat_key else None
+
+    # Terjemahkan kata kunci Bahasa Indonesia ke istilah tag bahasa Inggris
+    en_query = translate_indonesian_query(keyword)
+
+    # Bentuk final search query untuk XVideos
+    if current_category:
+        cat_prefix = current_category["keywords"][0]
+        if cat_prefix not in en_query:
+            query_str = f"{cat_prefix} {en_query}"
+        else:
+            query_str = en_query
+    else:
+        query_str = en_query
+
+    logger.info(f"User {ctx.author} mencari '{keyword}' (Tag: '{en_query}', Final: '{query_str}') di #{ctx.channel.name} (Kategori: {current_category['name'] if current_category else 'Bebas'})")
 
     try:
-        # Sesuaikan query pencarian jika dijalankan di channel spesifik
-        query_str = f"{current_category['keywords'][0]} {keyword}" if current_category else keyword
-
         # 1. Prioritas Pertama: Cari langsung ke XVideos
         raw_results = []
         try:
@@ -628,7 +822,7 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
         if not raw_results:
             not_found_embed = discord.Embed(
                 title="🔍 Hasil Pencarian Tidak Ditemukan",
-                description=f"Tidak ditemukan video dengan kata kunci: **{keyword}**.\nCobalah dengan kata kunci lain.",
+                description=f"Tidak ditemukan video dengan kata kunci: **{keyword}** (`{en_query}`).\nCobalah dengan kata kunci lain.",
                 color=discord.Color.dark_gray()
             )
             await ctx.send(embed=not_found_embed)
@@ -638,6 +832,14 @@ async def cari_video(ctx: commands.Context, *, keyword: Optional[str] = None) ->
         top_video = normalize_video_data(raw_results[0], default_category=current_category["name"] if current_category else None)
         embed = create_video_embed(top_video, category_info=current_category, is_search=True)
         view = VideoActionView(top_video["url"])
+
+        # Tambahkan informasi kata kunci pencarian jika diterjemahkan
+        if en_query != keyword.lower():
+            embed.add_field(
+                name="🔍 Kata Kunci Pencarian",
+                value=f"• Asli: `{keyword}`\n• Terjemahan Tag: `{en_query}`",
+                inline=False
+            )
 
         # Jika ada video tambahan lainnya, cantumkan di embed
         additional_links = []
