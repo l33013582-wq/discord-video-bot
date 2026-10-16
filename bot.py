@@ -664,27 +664,126 @@ async def fetch_roshy_videos(session: aiohttp.ClientSession, query: Optional[str
         return []
 
 
+BLOCKED_FILEHOST_DOMAINS: Set[str] = {
+    "k2s.cc", "keep2share", "uploadgig.com", "rapidgator.net",
+    "filemoon", "kamehaus", "katfile", "mexashare", "nitroflare",
+    "turbobit", "alfafile", "rosefile", "ddownload"
+}
+
+def is_valid_playable_video_url(url: Optional[str]) -> bool:
+    """Memastikan URL benar-benar streaming video langsung (bukan web hosting / paywall filehost)."""
+    if not url or not isinstance(url, str) or not url.startswith("http"):
+        return False
+    url_lower = url.lower()
+    for blocked in BLOCKED_FILEHOST_DOMAINS:
+        if blocked in url_lower:
+            return False
+    # Valid CDN streaming video asli (xvideos-cdn.com, eporner, dll)
+    if "xvideos-cdn.com" in url_lower or "eporner" in url_lower:
+        return True
+    if any(ext in url_lower for ext in [".mp4", ".webm"]):
+        # Hindari link web locker yang menyertakan ekstensi di path URL
+        if not any(indicator in url_lower for indicator in ["/file/", "/download/", "drive.google", "mega.nz", "mediafire", "upload"]):
+            return True
+    return False
+
+
 async def extract_direct_mp4_url(session: aiohttp.ClientSession, video_page_url: str, proxy: Optional[str] = None) -> Optional[str]:
-    """Mengekstrak direct URL video .mp4 dari halaman XVideos agar Discord merender player video langsung (inline playable video)."""
+    """Mengekstrak direct URL video .mp4 langsung yang 100% bisa di-play di Discord sebagai native player."""
     if not video_page_url or not video_page_url.startswith("http"):
         return None
     try:
-        async with session.get(video_page_url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-            if resp.status == 200:
-                html_text = await resp.text()
-                # 1. Prioritaskan Video High Quality (720p / 480p / 360p)
-                match = re.search(r"html5player\.setVideoUrlHigh\('([^']+)'\)", html_text)
-                if not match:
-                    match = re.search(r"html5player\.setVideoUrlLow\('([^']+)'\)", html_text)
-                if match:
-                    return match.group(1)
+        # 1. Jika halaman XVideos:
+        if "xvideos.com" in video_page_url:
+            async with session.get(video_page_url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status == 200:
+                    html_text = await resp.text()
+                    # Cek konfigurasi html5player XVideos
+                    match = re.search(r"html5player\.setVideoUrlHigh\('([^']+)'\)", html_text)
+                    if not match:
+                        match = re.search(r"html5player\.setVideoUrlLow\('([^']+)'\)", html_text)
+                    if match and is_valid_playable_video_url(match.group(1)):
+                        return match.group(1)
 
-                # 2. Fallback: cari URL .mp4 di script player
-                mp4_matches = re.findall(r"https?://[^\s\"']+\.mp4[^\s\"']*", html_text)
-                if mp4_matches:
-                    return mp4_matches[0]
+                    # Cari URL mp4 CDN XVideos
+                    for u in re.findall(r"https?://[^\s\"']+\.mp4[^\s\"']*", html_text):
+                        if is_valid_playable_video_url(u) and "xvideos-cdn.com" in u:
+                            return u
+
+        # 2. Jika halaman Eporner
+        elif "eporner.com" in video_page_url:
+            async with session.get(video_page_url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status == 200:
+                    html_text = await resp.text()
+                    for u in re.findall(r"https?://[^\s\"']+\.mp4[^\s\"']*", html_text):
+                        if is_valid_playable_video_url(u):
+                            return u
+
+        # 3. Halaman lain (selain filehost yang diblokir)
+        elif not any(b in video_page_url.lower() for b in BLOCKED_FILEHOST_DOMAINS):
+            async with session.get(video_page_url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status == 200:
+                    html_text = await resp.text()
+                    for u in re.findall(r"https?://[^\s\"']+\.mp4[^\s\"']*", html_text):
+                        if is_valid_playable_video_url(u):
+                            return u
     except Exception as e:
         logger.warning(f"Gagal mengekstrak direct mp4 dari {video_page_url}: {e}")
+    return None
+
+
+async def resolve_video_direct_mp4(
+    session: aiohttp.ClientSession,
+    video: Dict[str, Any],
+    proxy: Optional[str] = None
+) -> Optional[Tuple[str, str]]:
+    """
+    Menemukan direct MP4 streaming yang 100% playable di Discord beserta URL aksi untuk tombol interaktif.
+    Mendukung integrasi Roshy.tv -> mencari stream kode JAV di XVideos agar video bisa diputar langsung di server Discord.
+    Mengembalikan: (direct_mp4_url, action_button_url) atau None jika tidak ada stream video langsung.
+    """
+    if not video or not isinstance(video, dict):
+        return None
+
+    video_url = video.get("url") or ""
+    video_title = video.get("title") or ""
+    source = video.get("source") or ""
+
+    # 1. Jika video dari Roshy.tv:
+    if source == "roshy" or "roshy.tv" in video_url.lower():
+        code = detect_jav_code(video_title)
+        if code:
+            try:
+                # Cari kode nuklir JAV tersebut di XVideos
+                xv_search_url = f"https://www.xvideos.com/?k={urllib.parse.quote_plus(code)}"
+                async with session.get(xv_search_url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status == 200:
+                        html_text = await resp.text()
+                        xv_items = parse_xvideos_html(html_text)
+                        target_xv_item = None
+                        code_clean = code.upper().replace("-", "")
+                        for it in xv_items:
+                            it_title_clean = re.sub(r'[^A-Za-z0-9]', '', it.get("title", "").upper())
+                            if code_clean in it_title_clean:
+                                target_xv_item = it
+                                break
+                        if not target_xv_item and xv_items:
+                            target_xv_item = xv_items[0]
+
+                        if target_xv_item and target_xv_item.get("url"):
+                            direct_mp4 = await extract_direct_mp4_url(session, target_xv_item["url"], proxy=proxy)
+                            if direct_mp4 and is_valid_playable_video_url(direct_mp4):
+                                return direct_mp4, video_url
+            except Exception as e:
+                logger.debug(f"Pencarian kode JAV XVideos untuk Roshy '{code}' gagal: {e}")
+        return None
+
+    # 2. Jika video dari XVideos / Eporner / lainnya:
+    if video_url.startswith("http"):
+        direct_mp4 = await extract_direct_mp4_url(session, video_url, proxy=proxy)
+        if direct_mp4 and is_valid_playable_video_url(direct_mp4):
+            return direct_mp4, video_url
+
     return None
 
 
@@ -1084,25 +1183,54 @@ class MultiChannelAdultBot(commands.Bot):
                     logger.info(f"[Auto-Update] [{cat_name}] Semua video JAV pada query ini sudah pernah diunggah.")
                     return
 
-                count_to_send = min(3, len(new_videos))
-                videos_to_send = random.sample(new_videos, count_to_send)
+                # Acak kandidat untuk variasi maksimal
+                random.shuffle(new_videos)
 
-                for video in videos_to_send:
-                    direct_mp4 = await extract_direct_mp4_url(self.session, video["url"], proxy=self.proxy)
-                    view = VideoActionView(video["url"])
+                # Kumpulkan tepat hingga 3 video yang 100% playable (punya native video player)
+                playable_posts: List[Tuple[Dict[str, Any], str, str]] = []
+                for video in new_videos:
+                    resolved = await resolve_video_direct_mp4(self.session, video, proxy=self.proxy)
+                    if resolved:
+                        direct_mp4, action_url = resolved
+                        playable_posts.append((video, direct_mp4, action_url))
+                        if len(playable_posts) >= 3:
+                            break
+
+                # Jika belum sampai 3 video player (misal video Roshy tidak ada di XVideos), ambil dari XVideos fresh
+                if len(playable_posts) < 3:
+                    for extra_p in range(1, 4):
+                        extra_url = f"https://www.xvideos.com/?k={urllib.parse.quote_plus(sub_query)}&sort={sort_mode}&p={extra_p}"
+                        extra_items = await self._fetch_videos_with_fallback(extra_url, sub_query, default_category=cat_name)
+                        for raw_it in extra_items:
+                            it_data = normalize_video_data(raw_it, default_category=cat_info["name"])
+                            if it_data.get("url") and not self.history.is_seen(it_data):
+                                if any(p[0]["id"] == it_data["id"] for p in playable_posts):
+                                    continue
+                                resolved = await resolve_video_direct_mp4(self.session, it_data, proxy=self.proxy)
+                                if resolved:
+                                    direct_mp4, action_url = resolved
+                                    playable_posts.append((it_data, direct_mp4, action_url))
+                                    if len(playable_posts) >= 3:
+                                        break
+                        if len(playable_posts) >= 3:
+                            break
+
+                if not playable_posts:
+                    logger.warning(f"[Auto-Update] [{cat_name}] Tidak ada video dengan stream MP4 yang bisa diputar.")
+                    return
+
+                # Kirim semua video langsung sebagai native inline video player di Discord!
+                for video, direct_mp4, action_url in playable_posts:
+                    view = VideoActionView(action_url)
+                    content = (
+                        f"🔞 **{video['title']}**\n"
+                        f"⏱️ `{video.get('duration', 'N/A')}` • 🌐 `{cat_name}`\n"
+                        f"{direct_mp4}"
+                    )
                     try:
-                        if direct_mp4:
-                            content = (
-                                f"🔞 **{video['title']}**\n"
-                                f"⏱️ `{video.get('duration', 'N/A')}` • 🌐 `{cat_name}`\n"
-                                f"{direct_mp4}"
-                            )
-                            await channel.send(content=content, view=view)
-                        else:
-                            embed = create_video_embed(video, category_info=cat_info, is_search=False)
-                            await channel.send(embed=embed, view=view)
+                        await channel.send(content=content, view=view)
                         self.history.mark_as_seen(video)
-                        logger.info(f"[Auto-Update] [{cat_name}] Berhasil posting JAV: {video['title'][:40]} (Sumber: {video.get('source', 'XVideos')})")
+                        logger.info(f"[Auto-Update] [{cat_name}] Berhasil posting video player JAV: {video['title'][:40]}")
                         await asyncio.sleep(2)
                     except discord.Forbidden:
                         logger.error(f"[Auto-Update] [{cat_name}] Tidak memiliki izin kirim pesan di channel #{channel.name}!")
@@ -1139,25 +1267,52 @@ class MultiChannelAdultBot(commands.Bot):
                 logger.info(f"[Auto-Update] [{cat_name}] Semua video pada query ini sudah pernah diunggah. Mencari variasi berikutnya...")
                 return
 
-            logger.info(f"[Auto-Update] [{cat_name}] Ditemukan {len(new_videos)} video baru. Mengunggah ke #{channel.name}...")
+            random.shuffle(new_videos)
 
-            count_to_send = min(3, len(new_videos))
-            videos_to_send = random.sample(new_videos, count_to_send)
+            # Kumpulkan hingga 3 video yang 100% playable
+            playable_posts: List[Tuple[Dict[str, Any], str, str]] = []
+            for video in new_videos:
+                resolved = await resolve_video_direct_mp4(self.session, video, proxy=self.proxy)
+                if resolved:
+                    direct_mp4, action_url = resolved
+                    playable_posts.append((video, direct_mp4, action_url))
+                    if len(playable_posts) >= 3:
+                        break
 
-            for video in videos_to_send:
-                direct_mp4 = await extract_direct_mp4_url(self.session, video["url"], proxy=self.proxy)
-                view = VideoActionView(video["url"])
+            # Jika kurang dari 3, ambil halaman tambahan
+            if len(playable_posts) < 3:
+                for extra_p in range(1, 4):
+                    extra_url = f"https://www.xvideos.com/?k={urllib.parse.quote_plus(sub_query)}&sort={sort_mode}&p={extra_p}"
+                    extra_items = await self._fetch_videos_with_fallback(extra_url, sub_query, default_category=cat_name)
+                    for raw_it in extra_items:
+                        it_data = normalize_video_data(raw_it, default_category=cat_info["name"])
+                        if it_data.get("url") and not self.history.is_seen(it_data):
+                            if any(p[0]["id"] == it_data["id"] for p in playable_posts):
+                                continue
+                            resolved = await resolve_video_direct_mp4(self.session, it_data, proxy=self.proxy)
+                            if resolved:
+                                direct_mp4, action_url = resolved
+                                playable_posts.append((it_data, direct_mp4, action_url))
+                                if len(playable_posts) >= 3:
+                                    break
+                    if len(playable_posts) >= 3:
+                        break
+
+            if not playable_posts:
+                logger.warning(f"[Auto-Update] [{cat_name}] Tidak ada video dengan stream MP4 yang bisa diputar.")
+                return
+
+            logger.info(f"[Auto-Update] [{cat_name}] Mengunggah {len(playable_posts)} video player langsung ke #{channel.name}...")
+
+            for video, direct_mp4, action_url in playable_posts:
+                view = VideoActionView(action_url)
+                content = (
+                    f"🔞 **{video['title']}**\n"
+                    f"⏱️ `{video.get('duration', 'N/A')}` • 🌐 `{cat_name}`\n"
+                    f"{direct_mp4}"
+                )
                 try:
-                    if direct_mp4:
-                        content = (
-                            f"🔞 **{video['title']}**\n"
-                            f"⏱️ `{video.get('duration', 'N/A')}` • 🌐 `{cat_name}`\n"
-                            f"{direct_mp4}"
-                        )
-                        await channel.send(content=content, view=view)
-                    else:
-                        embed = create_video_embed(video, category_info=cat_info, is_search=False)
-                        await channel.send(embed=embed, view=view)
+                    await channel.send(content=content, view=view)
                     self.history.mark_as_seen(video)
                     logger.info(f"[Auto-Update] [{cat_name}] Berhasil posting video: {video['title'][:40]} (ID: {video['id']})")
                     await asyncio.sleep(2)  # Delay rate limit Discord
@@ -1477,12 +1632,12 @@ async def cari_video(
             except Exception as p1_err:
                 logger.info(f"Pencarian XVideos p=1 gagal/timeout: {p1_err}")
 
-        # Tentukan kandidat video yang akan dikirim (prioritaskan video segar yang belum pernah di-drop)
+        # Tentukan kandidat video yang akan dikirim (ambil beberapa kandidat segar untuk verifikasi playability)
         if fresh_results:
-            candidates = fresh_results[:3]
+            candidates = fresh_results[:6]
         elif detected_code:
             # Khusus pencarian kode nuklir yang spesifik, izinkan hasil pencarian jika tidak ada varian lain
-            candidates = raw_results[:3]
+            candidates = raw_results[:6]
         else:
             candidates = []
 
@@ -1505,13 +1660,25 @@ async def cari_video(
             for it in candidates
         ]
 
-        # Ekstraksi Direct MP4 stream secara paralel untuk semua video kandidat
-        mp4_urls = await asyncio.gather(
-            *(extract_direct_mp4_url(bot.session, v["url"], proxy=bot.proxy) for v in normalized_candidates)
+        # Ekstraksi Direct MP4 stream secara paralel untuk semua kandidat (mendukung resolusi kode JAV Roshy -> XVideos)
+        resolved_results = await asyncio.gather(
+            *(resolve_video_direct_mp4(bot.session, v, proxy=bot.proxy) for v in normalized_candidates)
         )
 
+        # Prioritaskan video yang memiliki stream direct MP4 playable langsung di Discord
+        playable_results = []
+        fallback_results = []
+        for v, res in zip(normalized_candidates, resolved_results):
+            if res:
+                playable_results.append((v, res[0], res[1]))
+            else:
+                fallback_results.append((v, None, v["url"]))
+
+        # Pilih hingga 3 video terbaik untuk dikirim (utamakan yang punya video player)
+        selected_to_send = (playable_results + fallback_results)[:3]
+
         # Kirim SEMUA video langsung sebagai Player Video (Inline Playable Video) atau Embed interaktif
-        for idx, (video, direct_mp4) in enumerate(zip(normalized_candidates, mp4_urls)):
+        for idx, (video, direct_mp4, action_url) in enumerate(selected_to_send):
             is_exact_code = bool(detected_code and (exact_code_matches or detected_code.upper() in video["title"].upper()))
             header_badge = f"🎬 **[KODE NUKLIR: {detected_code}]** " if is_exact_code else ""
 
@@ -1529,7 +1696,7 @@ async def cari_video(
                 if dur_val and dur_val in DURATION_LABELS:
                     lines.append(f"⏳ **Filter Durasi:** `{DURATION_LABELS[dur_val]}`")
 
-            view = VideoActionView(video["url"])
+            view = VideoActionView(action_url)
 
             if direct_mp4:
                 lines.append(direct_mp4)
@@ -1542,7 +1709,7 @@ async def cari_video(
             bot.history.mark_as_seen(video)
 
             # Jeda waktu singkat jika mengirim beberapa video agar Discord merender player secara teratur
-            if idx < len(normalized_candidates) - 1:
+            if idx < len(selected_to_send) - 1:
                 await asyncio.sleep(1)
 
     except asyncio.TimeoutError:
