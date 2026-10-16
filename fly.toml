@@ -1,0 +1,16 @@
+# fly.toml app configuration file for Sugiono Discord Bot
+# Dikonfigurasi khusus kuota gratis Fly.io (shared-cpu-1x 256MB)
+
+app = "sugiono-discord-bot"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[processes]
+  app = "python bot.py"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  cpus = 1
