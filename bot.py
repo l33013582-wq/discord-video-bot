@@ -4,7 +4,10 @@ import json
 import random
 import logging
 import asyncio
+import socket
+import html
 import urllib.parse
+import urllib.request
 from typing import Optional, List, Dict, Any, Set, Tuple
 from datetime import datetime, timezone
 
@@ -42,7 +45,7 @@ def parse_channel_id(env_name: str) -> Optional[int]:
         return None
 
 # ==============================================================================
-# 2. KONFIGURASI 3 KATEGORI / GENRE WILAYAH (JEPANG, ASIA, WESTERN)
+# 2. KONFIGURASI 4 KATEGORI / GENRE WILAYAH (JEPANG, HENTAI, ASIA, WESTERN)
 # ==============================================================================
 CATEGORIES: Dict[str, Dict[str, Any]] = {
     "jepang": {
@@ -57,6 +60,18 @@ CATEGORIES: Dict[str, Dict[str, Any]] = {
             "japanese schoolgirl", "japanese milf", "japanese nurse", "tokyo jav",
             "japanese wife", "japanese cosplay", "japanese amateur", "jav hd",
             "japanese creampie", "japanese cheating", "japanese sister", "japanese office"
+        ]
+    },
+    "hentai": {
+        "key": "hentai",
+        "name": "Hentai (Nekopoi Anime & Manga)",
+        "emoji": "🌸",
+        "channel_id": parse_channel_id("CHANNEL_HENTAI_ID"),
+        "api_url": os.getenv("API_HENTAI_URL", "https://nekopoi.care/wp-json/wp/v2/posts?_embed=1&categories=2,81,682"),
+        "color": discord.Color.from_rgb(255, 105, 180),  # Hot Pink
+        "keywords": [
+            "hentai", "anime hentai", "manga", "3d hentai", "sub indo",
+            "kangoku senkan", "overflow", "isekai", "cosplay", "uncensored"
         ]
     },
     "asia": {
@@ -179,6 +194,11 @@ INDONESIAN_TRANSLATION_MAP: Dict[str, str] = {
     # Wilayah & Ras / Kategori Utama
     "jepang": "japanese",
     "jav": "jav japanese",
+    "hentai": "hentai",
+    "anime": "anime hentai",
+    "manga": "manga",
+    "kartun": "hentai anime",
+    "animasi": "3d hentai",
     "asia": "asian",
     "barat": "western",
     "bule": "western",
@@ -313,7 +333,7 @@ def translate_indonesian_query(query: str) -> str:
 # PENGATURAN DURASI & DETEKSI KODE NUKLIR JAV
 # ------------------------------------------------------------------------------
 VALID_DURATIONS: Set[str] = {"all", "hours", "20min_more", "10-20min", "3-10min", "1-3min"}
-VALID_CATEGORIES: Set[str] = {"auto", "jepang", "asia", "western", "semua"}
+VALID_CATEGORIES: Set[str] = {"auto", "jepang", "hentai", "asia", "western", "semua"}
 
 DURATION_LABELS: Dict[str, str] = {
     "hours": "🎬 Jam-jaman / Film Panjang (20m+ Sort Durasi)",
@@ -470,6 +490,180 @@ def parse_xvideos_html(html_text: str, default_category: Optional[str] = None) -
     return results
 
 
+# ==============================================================================
+# RESOLVER DNS ANTI-BLOKIR (DOH GOOGLE / CLOUDFLARE FALLBACK)
+# ==============================================================================
+DOH_CACHE: Dict[str, List[str]] = {
+    "nekopoi.care": ["104.21.14.33", "172.67.157.174"],
+    "roshy.tv": ["104.21.76.232", "172.67.202.18"]
+}
+
+class CustomDoHResolver(aiohttp.resolver.AbstractResolver):
+    """
+    Resolver DNS cerdas dengan dukungan DoH (DNS-over-HTTPS Google/Cloudflare).
+    Memungkinkan bot mengakses nekopoi.care dan roshy.tv secara langsung tanpa
+    terpengaruh DNS poisoning / pemblokiran ISP lokal di Indonesia maupun server production.
+    """
+    def __init__(self, loop=None):
+        self._loop = loop or asyncio.get_event_loop()
+        self._default = aiohttp.resolver.ThreadedResolver(self._loop)
+
+    async def resolve(self, host: str, port: int = 0, family: int = socket.AF_INET) -> List[Dict[str, Any]]:
+        # 1. Gunakan cache IP Cloudflare yang sudah terverifikasi jika tersedia
+        if host in DOH_CACHE:
+            return [{
+                "hostname": host,
+                "host": ip,
+                "port": port,
+                "family": family,
+                "proto": 0,
+                "flags": socket.AI_NUMERICHOST
+            } for ip in DOH_CACHE[host]]
+
+        # 2. Coba resolver standar sistem
+        try:
+            return await self._default.resolve(host, port, family)
+        except Exception:
+            # 3. Fallback DoH Google jika DNS sistem diblokir / gagal
+            try:
+                doh_url = f"https://dns.google/resolve?name={host}&type=A"
+                req = urllib.request.Request(doh_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=4) as resp:
+                    data = json.loads(resp.read().decode())
+                    answers = [a["data"] for a in data.get("Answer", []) if a.get("type") == 1]
+                    if answers:
+                        DOH_CACHE[host] = answers
+                        return [{
+                            "hostname": host,
+                            "host": ip,
+                            "port": port,
+                            "family": family,
+                            "proto": 0,
+                            "flags": socket.AI_NUMERICHOST
+                        } for ip in answers]
+            except Exception:
+                pass
+            raise
+
+    async def close(self) -> None:
+        await self._default.close()
+
+
+# ==============================================================================
+# 5.1 SCRAPER KHUSUS NEKOPOI.CARE (HENTAI ANIME & MANGA)
+# ==============================================================================
+async def fetch_nekopoi_posts(session: aiohttp.ClientSession, query: Optional[str] = None, page: int = 1) -> List[Dict[str, Any]]:
+    """
+    Mengambil data konten Hentai Anime, 3D Hentai, dan Manga/Animasi dari nekopoi.care melalui REST API.
+    Mendukung pencarian kata kunci maupun feed rilis terbaru.
+    """
+    try:
+        if query:
+            url = f"https://nekopoi.care/wp-json/wp/v2/posts?_embed=1&search={urllib.parse.quote_plus(query)}&page={page}&per_page=8"
+        else:
+            url = f"https://nekopoi.care/wp-json/wp/v2/posts?_embed=1&categories=2,81,682&page={page}&per_page=8"
+
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status != 200:
+                return []
+            posts = await resp.json()
+            if not isinstance(posts, list):
+                return []
+
+            results = []
+            for p in posts:
+                post_id = p.get("id", "")
+                raw_title = p.get("title", {}).get("rendered", "Hentai Video")
+                title = html.unescape(raw_title).strip()
+                link = p.get("link", "")
+
+                # Ekstraksi featured poster image
+                thumb = None
+                media = p.get("_embedded", {}).get("wp:featuredmedia", [])
+                if media and isinstance(media, list) and len(media) > 0:
+                    thumb = media[0].get("source_url")
+
+                # Ekstraksi sinopsis / deskripsi cerita
+                content = p.get("content", {}).get("rendered", "")
+                synopsis = ""
+                m_syn = re.search(r'<b>Sinopsis</b>\s*</p>\s*<p[^>]*>(.*?)</p>', content, re.DOTALL | re.IGNORECASE)
+                if m_syn:
+                    synopsis = re.sub(r'<[^>]+>', '', m_syn.group(1)).strip()
+                if not synopsis:
+                    excerpt = p.get("excerpt", {}).get("rendered", "")
+                    synopsis = re.sub(r'<[^>]+>', '', excerpt).strip()
+
+                results.append({
+                    "id": f"nekopoi-{post_id}",
+                    "title": title,
+                    "url": link,
+                    "thumbnail": thumb,
+                    "duration": "Full Episode",
+                    "tags": "Anime Hentai, Sub Indo",
+                    "description": synopsis[:240] if synopsis else None,
+                    "category": "Hentai (Nekopoi Anime & Manga)",
+                    "source": "nekopoi"
+                })
+            return results
+    except Exception as e:
+        logger.warning(f"Gagal mengambil feed dari Nekopoi: {e}")
+        return []
+
+
+# ==============================================================================
+# 5.2 SCRAPER KHUSUS ROSHY.TV (DECENSORED JAV DENGAN SUBTITLE)
+# ==============================================================================
+async def fetch_roshy_videos(session: aiohttp.ClientSession, query: Optional[str] = None, page: int = 1) -> List[Dict[str, Any]]:
+    """
+    Mengambil data video JAV Tanpa Sensor (Decensored) dan Subtitle dari platform https://roshy.tv/.
+    Mendukung pencarian Kode Nuklir JAV (misal: SSIS-878, ALDN-056, LULU-345) dan feed terbaru.
+    """
+    try:
+        if query:
+            url = f"https://roshy.tv/page/{page}/?s={urllib.parse.quote_plus(query)}" if page > 1 else f"https://roshy.tv/?s={urllib.parse.quote_plus(query)}"
+        else:
+            url = f"https://roshy.tv/page/{page}/" if page > 1 else "https://roshy.tv/"
+
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status != 200:
+                return []
+            html_text = await resp.text()
+            soup = BeautifulSoup(html_text, "html.parser")
+            results = []
+
+            for post in soup.select(".post-item"):
+                a_tag = post.select_one("a.blog-img-link") or post.select_one("h2 a") or post.select_one("a")
+                if not a_tag or not a_tag.get("href"):
+                    continue
+                href = a_tag.get("href")
+                raw_title = a_tag.get("title") or (post.select_one("h2").text.strip() if post.select_one("h2") else a_tag.text.strip())
+                title = html.unescape(raw_title).strip()
+
+                img_tag = post.select_one("img")
+                thumb = img_tag.get("data-src") or img_tag.get("src") if img_tag else None
+
+                dur_tag = post.select_one(".beeteam368-bt-to-img") or post.select_one(".duration")
+                dur = dur_tag.text.strip().replace("\n", " ") if dur_tag else "Full JAV"
+
+                post_id = a_tag.get("data-post-id") or post.get("id", href)
+
+                results.append({
+                    "id": f"roshy-{post_id}",
+                    "title": title,
+                    "url": href,
+                    "thumbnail": thumb,
+                    "duration": dur,
+                    "tags": "Decensored JAV, Eng Sub",
+                    "description": None,
+                    "category": "Jepang (JAV / Japanese)",
+                    "source": "roshy"
+                })
+            return results
+    except Exception as e:
+        logger.warning(f"Gagal mengambil video dari Roshy.tv: {e}")
+        return []
+
+
 async def extract_direct_mp4_url(session: aiohttp.ClientSession, video_page_url: str, proxy: Optional[str] = None) -> Optional[str]:
     """Mengekstrak direct URL video .mp4 dari halaman XVideos agar Discord merender player video langsung (inline playable video)."""
     if not video_page_url or not video_page_url.startswith("http"):
@@ -495,8 +689,7 @@ async def extract_direct_mp4_url(session: aiohttp.ClientSession, video_page_url:
 
 
 def normalize_video_data(raw_item: Dict[str, Any], default_category: Optional[str] = None) -> Dict[str, Any]:
-    """Menormalisasi data respons JSON API (mendukung Eporner, Redtube, dan format generik)."""
-    # Jika format Redtube, data dibungkus di dalam key 'video'
+    """Menormalisasi data respons JSON API (mendukung Nekopoi, Roshy.tv, Eporner, Redtube, dan XVideos)."""
     item = raw_item.get("video") if isinstance(raw_item.get("video"), dict) else raw_item
 
     video_id = (
@@ -564,9 +757,11 @@ def normalize_video_data(raw_item: Dict[str, Any], default_category: Optional[st
         "thumbnail": str(thumbnail) if thumbnail else None,
         "duration": str(duration),
         "tags": tags_str if tags_str else "Umum",
+        "description": item.get("description"),
+        "source": item.get("source"),
         "rate": str(rate) if rate else None,
         "views": f"{int(views):,}" if str(views).isdigit() else str(views) if views else None,
-        "category": default_category
+        "category": item.get("category") or default_category
     }
 
 
@@ -579,10 +774,17 @@ def create_video_embed(video: Dict[str, Any], category_info: Optional[Dict[str, 
         embed_color = discord.Color.from_rgb(220, 20, 60) if not is_search else discord.Color.from_rgb(255, 69, 0)
         category_name = "Umum / Campuran"
 
+    # Jika tersedia sinopsis cerita (khususnya Nekopoi Anime/Manga), tampilkan secara estetik
+    desc = video.get("description")
+    if desc:
+        desc_text = f"📖 *{desc}*\n\n[🔗 **Klik di sini untuk menonton / membaca**]({video['url']})"
+    else:
+        desc_text = f"[🔗 **Klik di sini untuk menonton**]({video['url']})" if video["url"] else "Tautan video tidak tersedia"
+
     embed = discord.Embed(
         title=f"🔞 {video['title'][:250]}",
         url=video["url"] if video["url"].startswith("http") else None,
-        description=f"[🔗 **Klik di sini untuk menonton**]({video['url']})" if video["url"] else "Tautan video tidak tersedia",
+        description=desc_text,
         color=embed_color,
         timestamp=datetime.now(timezone.utc)
     )
@@ -617,11 +819,21 @@ class VideoActionView(discord.ui.View):
     def __init__(self, video_url: str):
         super().__init__(timeout=None)
         if video_url and video_url.startswith("http"):
+            if "nekopoi.care" in video_url:
+                label = "🌸 Buka di Nekopoi"
+                emoji = "🔞"
+            elif "roshy.tv" in video_url:
+                label = "▶️ Nonton di Roshy.tv"
+                emoji = "🇯🇵"
+            else:
+                label = "▶️ Tonton Video"
+                emoji = "🔞"
+
             self.add_item(discord.ui.Button(
-                label="▶️ Tonton Video",
+                label=label,
                 url=video_url,
                 style=discord.ButtonStyle.link,
-                emoji="🔞"
+                emoji=emoji
             ))
 
 
@@ -656,7 +868,8 @@ class MultiChannelAdultBot(commands.Bot):
         # Cek jika ada proxy di .env (misal: http://127.0.0.1:10809 atau socks5)
         proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
         timeout = aiohttp.ClientTimeout(total=25)
-        connector = aiohttp.TCPConnector(ssl=False) if proxy else None
+        resolver = CustomDoHResolver()
+        connector = aiohttp.TCPConnector(resolver=resolver, ssl=False) if not proxy else aiohttp.TCPConnector(ssl=False)
         
         self.session = aiohttp.ClientSession(
             headers=headers,
@@ -666,7 +879,7 @@ class MultiChannelAdultBot(commands.Bot):
         self.proxy = proxy
         if self.proxy:
             logger.info(f"Menggunakan Proxy untuk request API: {self.proxy}")
-        logger.info("Sesi aiohttp.ClientSession berhasil dibuat.")
+        logger.info("Sesi aiohttp.ClientSession berhasil dibuat (Didukung DoH Anti-Blokir).")
 
         # Sinkronisasi native Discord Slash Command (/)
         try:
@@ -696,18 +909,18 @@ class MultiChannelAdultBot(commands.Bot):
 
         activity = discord.Activity(
             type=discord.ActivityType.watching,
-            name="3 Channel | Ketik /cari"
+            name="4 Channel | Ketik /cari"
         )
         await self.change_presence(status=discord.Status.online, activity=activity)
 
     # --------------------------------------------------------------------------
-    # AUTO-UPDATE BACKGROUND TASK (Setiap 30 Menit ke 3 Channel)
+    # AUTO-UPDATE BACKGROUND TASK (Setiap 30 Menit ke 4 Channel)
     # --------------------------------------------------------------------------
     @tasks.loop(minutes=30)
     async def auto_update_all_channels(self) -> None:
-        """Melakukan pengecekan berkala dan mengunggah video ke 3 channel sesuai kategorinya."""
+        """Melakukan pengecekan berkala dan mengunggah video ke 4 channel sesuai kategorinya."""
         logger.info("=" * 60)
-        logger.info("[Auto-Update] Memulai siklus auto-update ke 3 channel (Jepang, Asia, Western)...")
+        logger.info("[Auto-Update] Memulai siklus auto-update ke 4 channel (Jepang, Hentai, Asia, Western)...")
 
         for cat_key, cat_info in CATEGORIES.items():
             channel_id = cat_info["channel_id"]
@@ -738,7 +951,7 @@ class MultiChannelAdultBot(commands.Bot):
             # Jeda waktu antar kategori agar tidak membebani network / rate limit
             await asyncio.sleep(3)
 
-        logger.info("[Auto-Update] Siklus auto-update 3 channel selesai.")
+        logger.info("[Auto-Update] Siklus auto-update 4 channel selesai.")
         logger.info("=" * 60)
 
     async def _fetch_videos_with_fallback(self, primary_url: str, fallback_query: str, default_category: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -788,17 +1001,124 @@ class MultiChannelAdultBot(commands.Bot):
         return []
 
     async def _process_category_update(self, channel: discord.abc.Messageable, cat_info: Dict[str, Any]) -> None:
-        """Mengambil data video terbaru dan bervariasi dari API untuk kategori tertentu dan mengirimkannya."""
+        """Mengambil data video/manga terbaru dan bervariasi dari API untuk kategori tertentu dan mengirimkannya."""
+        cat_key = cat_info["key"]
         cat_name = cat_info["name"]
-        
-        # 1. Pilih keyword sub-genre secara acak agar konten selalu bervariasi setiap siklus
+
+        # ======================================================================
+        # 1. KHUSUS KATEGORI HENTAI -> Diambil langsung dari Nekopoi.care
+        # ======================================================================
+        if cat_key == "hentai":
+            page_num = random.randint(1, 4)
+            use_sub_kw = random.choice([True, False])
+            sub_query = random.choice(cat_info["keywords"]) if use_sub_kw else None
+
+            logger.info(f"[Auto-Update] [{cat_name}] Mengambil rilis Nekopoi.care (Query: '{sub_query or 'Terbaru'}', Page: {page_num})...")
+            try:
+                raw_items = await fetch_nekopoi_posts(self.session, query=sub_query, page=page_num)
+                if not raw_items and sub_query:
+                    raw_items = await fetch_nekopoi_posts(self.session, query=None, page=1)
+
+                if not raw_items:
+                    logger.warning(f"[Auto-Update] [{cat_name}] Tidak ada konten ditemukan dari Nekopoi.")
+                    return
+
+                new_items = [it for it in raw_items if not self.history.is_seen(it)]
+                if not new_items:
+                    logger.info(f"[Auto-Update] [{cat_name}] Semua rilis Nekopoi pada batch ini sudah pernah diunggah.")
+                    return
+
+                count_to_send = min(3, len(new_items))
+                items_to_send = random.sample(new_items, count_to_send)
+
+                for item in items_to_send:
+                    embed = create_video_embed(item, category_info=cat_info, is_search=False)
+                    view = VideoActionView(item["url"])
+                    try:
+                        await channel.send(embed=embed, view=view)
+                        self.history.mark_as_seen(item)
+                        logger.info(f"[Auto-Update] [{cat_name}] Berhasil posting Nekopoi: {item['title'][:40]} (ID: {item['id']})")
+                        await asyncio.sleep(2)
+                    except discord.Forbidden:
+                        logger.error(f"[Auto-Update] [{cat_name}] Tidak memiliki izin kirim pesan di channel #{channel.name}!")
+                        break
+                    except Exception as err:
+                        logger.error(f"[Auto-Update] [{cat_name}] Gagal mengirim konten Nekopoi: {err}")
+            except Exception as e:
+                logger.error(f"[Auto-Update] [{cat_name}] Terjadi kesalahan pada feed Nekopoi: {e}", exc_info=True)
+            return
+
+        # ======================================================================
+        # 2. KHUSUS KATEGORI JEPANG (JAV) -> Paduan dari XVideos & Roshy.tv
+        # ======================================================================
+        if cat_key == "jepang":
+            sub_query = random.choice(cat_info["keywords"])
+            sort_mode = random.choices(["uploaddate", "rating", "views"], weights=[0.80, 0.12, 0.08], k=1)[0]
+            page_num = random.randint(0, 3)
+            xv_dynamic_url = f"https://www.xvideos.com/?k={urllib.parse.quote_plus(sub_query)}&sort={sort_mode}&p={page_num}"
+            logger.info(f"[Auto-Update] [{cat_name}] Mengambil feed kombinasi XVideos & Roshy.tv (Query: '{sub_query}')...")
+
+            try:
+                # Ambil paralel dari XVideos dan Roshy.tv
+                xv_task = self._fetch_videos_with_fallback(xv_dynamic_url, sub_query, default_category=cat_name)
+                roshy_task = fetch_roshy_videos(self.session, page=random.randint(1, 3))
+                xv_res, roshy_res = await asyncio.gather(xv_task, roshy_task, return_exceptions=True)
+
+                raw_videos = []
+                if isinstance(xv_res, list):
+                    raw_videos.extend(xv_res)
+                if isinstance(roshy_res, list):
+                    raw_videos.extend(roshy_res)
+
+                if not raw_videos:
+                    logger.warning(f"[Auto-Update] [{cat_name}] Tidak ada video ditemukan dari XVideos maupun Roshy.tv.")
+                    return
+
+                new_videos = []
+                for raw_item in raw_videos:
+                    item_data = normalize_video_data(raw_item, default_category=cat_info["name"])
+                    if item_data.get("url") and not self.history.is_seen(item_data):
+                        new_videos.append(item_data)
+
+                if not new_videos:
+                    logger.info(f"[Auto-Update] [{cat_name}] Semua video JAV pada query ini sudah pernah diunggah.")
+                    return
+
+                count_to_send = min(3, len(new_videos))
+                videos_to_send = random.sample(new_videos, count_to_send)
+
+                for video in videos_to_send:
+                    direct_mp4 = await extract_direct_mp4_url(self.session, video["url"], proxy=self.proxy)
+                    view = VideoActionView(video["url"])
+                    try:
+                        if direct_mp4:
+                            content = (
+                                f"🔞 **{video['title']}**\n"
+                                f"⏱️ `{video.get('duration', 'N/A')}` • 🌐 `{cat_name}`\n"
+                                f"{direct_mp4}"
+                            )
+                            await channel.send(content=content, view=view)
+                        else:
+                            embed = create_video_embed(video, category_info=cat_info, is_search=False)
+                            await channel.send(embed=embed, view=view)
+                        self.history.mark_as_seen(video)
+                        logger.info(f"[Auto-Update] [{cat_name}] Berhasil posting JAV: {video['title'][:40]} (Sumber: {video.get('source', 'XVideos')})")
+                        await asyncio.sleep(2)
+                    except discord.Forbidden:
+                        logger.error(f"[Auto-Update] [{cat_name}] Tidak memiliki izin kirim pesan di channel #{channel.name}!")
+                        break
+                    except Exception as send_err:
+                        logger.error(f"[Auto-Update] [{cat_name}] Gagal mengirim video JAV: {send_err}")
+            except Exception as e:
+                logger.error(f"[Auto-Update] [{cat_name}] Terjadi kesalahan saat update JAV: {e}", exc_info=True)
+            return
+
+        # ======================================================================
+        # 3. KATEGORI ASIA & WESTERN (XVIDEOS / FALLBACK EPORNER)
+        # ======================================================================
         sub_query = random.choice(cat_info["keywords"])
-        
-        # 2. Acak metode sorting (fokus video baru upload / uploaddate) dan pagination (halaman 0-3)
         sort_mode = random.choices(["uploaddate", "rating", "views"], weights=[0.80, 0.12, 0.08], k=1)[0]
         page_num = random.randint(0, 3)
-        
-        # Buat URL dinamis ke scraper XVideos
         xv_dynamic_url = f"https://www.xvideos.com/?k={urllib.parse.quote_plus(sub_query)}&sort={sort_mode}&p={page_num}"
         logger.info(f"[Auto-Update] [{cat_name}] Mengambil feed segar (Query: '{sub_query}', Sort: {sort_mode}, Page: {page_num})...")
 
@@ -821,7 +1141,6 @@ class MultiChannelAdultBot(commands.Bot):
 
             logger.info(f"[Auto-Update] [{cat_name}] Ditemukan {len(new_videos)} video baru. Mengunggah ke #{channel.name}...")
 
-            # Ambil maksimal 3 video secara acak dari kumpulan video baru
             count_to_send = min(3, len(new_videos))
             videos_to_send = random.sample(new_videos, count_to_send)
 
@@ -891,7 +1210,8 @@ bot = MultiChannelAdultBot()
     ],
     kategori=[
         discord.app_commands.Choice(name="🔄 Otomatis (Sesuai Channel)", value="auto"),
-        discord.app_commands.Choice(name="🇯🇵 Jepang (JAV)", value="jepang"),
+        discord.app_commands.Choice(name="🇯🇵 Jepang (JAV & Roshy.tv)", value="jepang"),
+        discord.app_commands.Choice(name="🌸 Hentai (Nekopoi Anime & Manga)", value="hentai"),
         discord.app_commands.Choice(name="🌏 Asia (Non-Jepang)", value="asia"),
         discord.app_commands.Choice(name="🌍 Western (Barat)", value="western"),
         discord.app_commands.Choice(name="🌐 Semua Kategori (Bebas)", value="semua"),
@@ -917,7 +1237,7 @@ async def cari_video(
                 "Perintah ini hanya dapat dijalankan di channel yang berstatus **NSFW (Age-Restricted)**!\n\n"
                 "Sesuai aturan Discord Community Guidelines dan Terms of Service, konten 18+ tidak boleh "
                 "ditampilkan di channel non-dewasa.\n\n"
-                "👉 *Silakan gunakan perintah ini di salah satu channel: **Jepang**, **Asia**, atau **Western**.*"
+                "👉 *Silakan gunakan perintah ini di channel NSFW: **Jepang**, **Hentai**, **Asia**, atau **Western**.*"
             ),
             color=discord.Color.red()
         )
@@ -946,9 +1266,10 @@ async def cari_video(
                 description=(
                     "Ketik apa yang ingin Anda cari langsung di channel ini atau gunakan opsi filter!\n\n"
                     "**1. Cari Biasa:** `/cari keyword: perawat` *(otomatis sesuai channel)*\n"
-                    "**2. Cari Kode Nuklir JAV:** `/cari keyword: SSIS-878` atau `/cari keyword: ALDN-056`\n"
-                    "**3. Filter Durasi:** `/cari durasi: Jam-jaman keyword: perawat` atau `/cari keyword: perawat 20 menit`\n"
-                    "**4. Pilih Kategori:** `/cari kategori: Jepang (JAV) keyword: tante`\n\n"
+                    "**2. Cari Anime/Manga Hentai:** `/cari keyword: overflow` atau `/cari keyword: kangoku` *(Nekopoi)*\n"
+                    "**3. Cari Kode Nuklir JAV:** `/cari keyword: SSIS-878` atau `/cari keyword: ALDN-056` *(Roshy.tv & XVideos)*\n"
+                    "**4. Filter Durasi:** `/cari durasi: Jam-jaman keyword: perawat` atau `/cari keyword: perawat 20 menit`\n"
+                    "**5. Pilih Kategori:** `/cari kategori: Hentai keyword: cosplay`\n\n"
                     f"💡 *Genre Channel Saat Ini:* **{channel_category['name'] if channel_category else 'Bebas / Umum'}**"
                 ),
                 color=discord.Color.gold()
@@ -970,7 +1291,9 @@ async def cari_video(
     else:
         # Cek nama channel
         ch_lower = channel_name.lower()
-        if "jav" in ch_lower or "jepang" in ch_lower:
+        if "hentai" in ch_lower or "nekopoi" in ch_lower:
+            current_category = CATEGORIES["hentai"]
+        elif "jav" in ch_lower or "jepang" in ch_lower:
             current_category = CATEGORIES["jepang"]
         elif "asia" in ch_lower:
             current_category = CATEGORIES["asia"]
@@ -978,14 +1301,52 @@ async def cari_video(
             current_category = CATEGORIES["western"]
         elif combined_kw:
             kw_lower = combined_kw.lower()
-            if any(w in kw_lower for w in ["jepang", "jav"]):
+            if any(w in kw_lower for w in ["hentai", "anime", "manga", "nekopoi"]):
+                current_category = CATEGORIES["hentai"]
+            elif any(w in kw_lower for w in ["jepang", "jav"]):
                 current_category = CATEGORIES["jepang"]
             elif any(w in kw_lower for w in ["barat", "bule", "western"]):
                 current_category = CATEGORIES["western"]
             elif any(w in kw_lower for w in ["asia", "indo", "korea", "cina", "china"]):
                 current_category = CATEGORIES["asia"]
 
-    # 5. Bentuk kata kunci pencarian
+    # ==========================================================================
+    # KHUSUS KATEGORI HENTAI -> Cari langsung di Nekopoi.care (Anime, Manga, 3D)
+    # ==========================================================================
+    if current_category and current_category["key"] == "hentai":
+        logger.info(f"User {ctx.author} mencari Hentai '{combined_kw}' di Nekopoi.care")
+        try:
+            neko_raw = await fetch_nekopoi_posts(bot.session, query=combined_kw, page=1)
+            if len(neko_raw) < 3:
+                more = await fetch_nekopoi_posts(bot.session, query=combined_kw, page=2)
+                neko_raw.extend(more)
+
+            fresh_results = [it for it in neko_raw if not bot.history.is_seen(it)]
+            candidates = fresh_results[:3] if fresh_results else neko_raw[:3]
+
+            if not candidates:
+                embed_empty = discord.Embed(
+                    title="🔍 Tidak Ada Konten Baru di Nekopoi",
+                    description=f"Semua konten Hentai di Nekopoi dengan kata kunci **{combined_kw}** sudah pernah di-drop di server.",
+                    color=discord.Color.from_rgb(255, 105, 180)
+                )
+                await ctx.send(embed=embed_empty)
+                return
+
+            for idx, item in enumerate(candidates):
+                embed = create_video_embed(item, category_info=current_category, is_search=True)
+                view = VideoActionView(item["url"])
+                await ctx.send(embed=embed, view=view)
+                bot.history.mark_as_seen(item)
+                if idx < len(candidates) - 1:
+                    await asyncio.sleep(1)
+            return
+        except Exception as neko_err:
+            logger.error(f"Pencarian Nekopoi error: {neko_err}", exc_info=True)
+            await ctx.send("⚠️ Terjadi gangguan saat mengambil data dari Nekopoi.care.")
+            return
+
+    # 5. Bentuk kata kunci pencarian (Untuk Kategori JAV, Asia, Western)
     if detected_code:
         query_str = combined_kw
         en_query = combined_kw
@@ -1007,9 +1368,14 @@ async def cari_video(
     )
 
     try:
-        # 1. Prioritas Pertama: Cari langsung ke XVideos dengan parameter durasi
         raw_results = []
-        try:
+        exact_code_matches = []
+
+        # ======================================================================
+        # PENCARIAN KATEGORI JEPANG (JAV) -> Paduan XVideos & Roshy.tv
+        # ======================================================================
+        if current_category and current_category["key"] == "jepang":
+            # Siapkan parameter XVideos
             xv_params: Dict[str, str] = {"k": query_str}
             if dur_val == "hours":
                 xv_params["durf"] = "20min_more"
@@ -1017,17 +1383,51 @@ async def cari_video(
             elif dur_val and dur_val in ["20min_more", "10-20min", "3-10min", "1-3min"]:
                 xv_params["durf"] = dur_val
 
-            async with bot.session.get("https://www.xvideos.com/", params=xv_params, proxy=bot.proxy, timeout=aiohttp.ClientTimeout(total=8)) as xv_resp:
-                if xv_resp.status == 200:
-                    xv_html = await xv_resp.text()
-                    xv_results = parse_xvideos_html(xv_html, default_category=current_category["name"] if current_category else None)
-                    if xv_results:
-                        raw_results = xv_results
-        except Exception as xv_err:
-            logger.info(f"Pencarian XVideos gagal/timeout: {xv_err}")
+            async def search_xv():
+                try:
+                    async with bot.session.get("https://www.xvideos.com/", params=xv_params, proxy=bot.proxy, timeout=aiohttp.ClientTimeout(total=8)) as xv_resp:
+                        if xv_resp.status == 200:
+                            xv_html = await xv_resp.text()
+                            return parse_xvideos_html(xv_html, default_category=current_category["name"])
+                except Exception as e:
+                    logger.info(f"Pencarian XVideos JAV gagal: {e}")
+                return []
+
+            async def search_roshy():
+                try:
+                    roshy_q = detected_code or combined_kw
+                    return await fetch_roshy_videos(bot.session, query=roshy_q)
+                except Exception as e:
+                    logger.info(f"Pencarian Roshy.tv JAV gagal: {e}")
+                return []
+
+            # Eksekusi paralel XVideos & Roshy.tv
+            xv_res, roshy_res = await asyncio.gather(search_xv(), search_roshy(), return_exceptions=True)
+            if isinstance(xv_res, list):
+                raw_results.extend(xv_res)
+            if isinstance(roshy_res, list):
+                raw_results.extend(roshy_res)
+
+        else:
+            # Kategori Asia, Western, atau Umum
+            xv_params: Dict[str, str] = {"k": query_str}
+            if dur_val == "hours":
+                xv_params["durf"] = "20min_more"
+                xv_params["sort"] = "length"
+            elif dur_val and dur_val in ["20min_more", "10-20min", "3-10min", "1-3min"]:
+                xv_params["durf"] = dur_val
+
+            try:
+                async with bot.session.get("https://www.xvideos.com/", params=xv_params, proxy=bot.proxy, timeout=aiohttp.ClientTimeout(total=8)) as xv_resp:
+                    if xv_resp.status == 200:
+                        xv_html = await xv_resp.text()
+                        xv_results = parse_xvideos_html(xv_html, default_category=current_category["name"] if current_category else None)
+                        if xv_results:
+                            raw_results = xv_results
+            except Exception as xv_err:
+                logger.info(f"Pencarian XVideos gagal/timeout: {xv_err}")
 
         # Jika mencari Kode Nuklir JAV, prioritaskan video yang judulnya memuat kode tersebut
-        exact_code_matches = []
         if detected_code and raw_results:
             code_upper = detected_code.upper()
             code_no_dash = code_upper.replace("-", "")
@@ -1042,7 +1442,7 @@ async def cari_video(
             if exact_code_matches:
                 raw_results = exact_code_matches + other_matches
 
-        # 2. Jika XVideos kosong dan bukan kode spesifik JAV, gunakan Redtube API sebagai cadangan
+        # Fallback ke Redtube jika hasil kosong dan bukan kode spesifik
         if not raw_results and not detected_code:
             try:
                 fallback_url = "https://api.redtube.com/"
@@ -1060,11 +1460,11 @@ async def cari_video(
             except Exception as fb_err:
                 logger.error(f"Fallback search API gagal: {fb_err}")
 
-        # 1. Filter video yang belum pernah di-drop di server
+        # Filter video yang belum pernah di-drop di server
         fresh_results = [item for item in raw_results if not bot.history.is_seen(item)]
 
         # Jika fresh_results kurang dari 3 dan bukan pencarian kode nuklir spesifik, ambil halaman tambahan (p=1)
-        if len(fresh_results) < 3 and not detected_code:
+        if len(fresh_results) < 3 and not detected_code and "xv_params" in locals():
             try:
                 p1_params = dict(xv_params)
                 p1_params["p"] = "1"
@@ -1081,7 +1481,7 @@ async def cari_video(
         if fresh_results:
             candidates = fresh_results[:3]
         elif detected_code:
-            # Khusus pencarian kode nuklir yang spesifik, izinkan hasil pencarian meski pernah di-drop jika tidak ada varian lain
+            # Khusus pencarian kode nuklir yang spesifik, izinkan hasil pencarian jika tidak ada varian lain
             candidates = raw_results[:3]
         else:
             candidates = []
@@ -1110,7 +1510,7 @@ async def cari_video(
             *(extract_direct_mp4_url(bot.session, v["url"], proxy=bot.proxy) for v in normalized_candidates)
         )
 
-        # Kirim SEMUA video langsung sebagai Player Video (Inline Playable Video)
+        # Kirim SEMUA video langsung sebagai Player Video (Inline Playable Video) atau Embed interaktif
         for idx, (video, direct_mp4) in enumerate(zip(normalized_candidates, mp4_urls)):
             is_exact_code = bool(detected_code and (exact_code_matches or detected_code.upper() in video["title"].upper()))
             header_badge = f"🎬 **[KODE NUKLIR: {detected_code}]** " if is_exact_code else ""
@@ -1158,10 +1558,10 @@ async def cari_video(
 @bot.hybrid_command(
     name="status",
     aliases=["info"],
-    description="Cek status dan koneksi 3 channel kategori bot (Jepang, Asia, Western)"
+    description="Cek status dan koneksi 4 channel kategori bot (Jepang, Hentai, Asia, Western)"
 )
 async def status_channel(ctx: commands.Context) -> None:
-    """Mengecek status dan ID ketiga channel yang terhubung ke bot."""
+    """Mengecek status dan ID keempat channel yang terhubung ke bot."""
     await ctx.defer()
 
     is_nsfw = getattr(ctx.channel, "is_nsfw", lambda: False)()
@@ -1171,7 +1571,7 @@ async def status_channel(ctx: commands.Context) -> None:
 
     embed = discord.Embed(
         title="📊 Status Konfigurasi Channel Kategori",
-        description="Berikut adalah status ketiga channel yang terdaftar pada sistem Auto-Update:",
+        description="Berikut adalah status keempat channel yang terdaftar pada sistem Auto-Update:",
         color=discord.Color.blue(),
         timestamp=datetime.now(timezone.utc)
     )
@@ -1210,19 +1610,20 @@ def build_help_home_embed() -> discord.Embed:
     embed.add_field(
         name="🎣 Perintah Dasar Cepat:",
         value=(
-            "• `/cari [kata_kunci / kode_nuklir]` — Cari video instan, dukung kode JAV (SSIS, ALDN) & filter durasi *(Bisa Diputar Langsung)*\n"
-            "• `/status` — Cek status koneksi 3 channel kategori & verifikasi status NSFW\n"
+            "• `/cari [kata_kunci / kode_nuklir]` — Cari video & anime instan, dukung kode JAV (SSIS, ALDN), Hentai Nekopoi & filter durasi\n"
+            "• `/status` — Cek status koneksi 4 channel kategori & verifikasi status NSFW\n"
             "• `/help` — Menampilkan pusat panduan interaktif ini"
         ),
         inline=False
     )
 
     embed.add_field(
-        name="📺 3 Saluran Video (Auto-Update Setiap 30 Menit):",
+        name="📺 4 Saluran Video & Anime (Auto-Update Setiap 30 Menit):",
         value=(
-            "• 🇯🇵 **Channel Jepang (`#jav`)** — Feed otomatis video JAV / Japanese terbaru\n"
-            "• 🌏 **Channel Asia (`#asia`)** — Feed otomatis video Asia Non-Jepang *(Korea, Indo, China, Thai)*\n"
-            "• 🌍 **Channel Western (`#western`)** — Feed otomatis video Western / Barat / Caucasian"
+            "• 🇯🇵 **Channel Jepang (`#jav`)** — Feed JAV terbaru dari **XVideos & Roshy.tv (Decensored Subtitle)**\n"
+            "• 🌸 **Channel Hentai (`#hentai`)** — Feed anime, 3D hentai & manga terbaru dari **Nekopoi.care**\n"
+            "• 🌏 **Channel Asia (`#asia`)** — Feed video Asia Non-Jepang *(Korea, Indo, China, Thai)*\n"
+            "• 🌍 **Channel Western (`#western`)** — Feed video Western / Barat / Caucasian"
         ),
         inline=False
     )
@@ -1269,11 +1670,12 @@ def build_help_perintah_embed() -> discord.Embed:
     embed.add_field(
         name="📌 1. Perintah `/cari` Lengkap:",
         value=(
-            "Mencari video dewasa secara instan dengan 3 opsi fleksibel:\n"
-            "• **Keyword / Kode Nuklir:** `/cari keyword: perawat` atau `/cari keyword: SSIS-878`\n"
-            "• **Filter Durasi:** `/cari durasi: Jam-jaman keyword: perawat`\n"
-            "• **Pilihan Kategori:** `/cari kategori: Jepang (JAV) keyword: tante`\n\n"
-            "👉 *Otomatis muncul sebagai Player Video dengan tombol Play di tengah!*"
+            "Mencari video & anime dewasa secara instan dengan opsi fleksibel:\n"
+            "• **Keyword / Kode Nuklir JAV:** `/cari keyword: perawat` atau `/cari keyword: SSIS-878` *(XVideos & Roshy.tv)*\n"
+            "• **Anime & Manga Hentai:** `/cari keyword: overflow` atau `/cari keyword: kangoku` *(Nekopoi.care)*\n"
+            "• **Filter Durasi:** `/cari durasi: Jam-jaman keyword: perawat` atau `/cari keyword: perawat 20 menit`\n"
+            "• **Pilihan Kategori:** `/cari kategori: Hentai (Nekopoi)` atau `/cari kategori: Jepang (JAV)`\n\n"
+            "👉 *Otomatis muncul sebagai Player Video atau Card Lengkap dengan tombol tonton!*"
         ),
         inline=False
     )
@@ -1281,8 +1683,8 @@ def build_help_perintah_embed() -> discord.Embed:
     embed.add_field(
         name="📊 2. Perintah `/status`",
         value=(
-            "Menampilkan status ketiga channel kategori yang terhubung ke bot:\n"
-            "• Memeriksa apakah Channel ID terdaftar.\n"
+            "Menampilkan status keempat channel kategori yang terhubung ke bot (Jepang, Hentai, Asia, Western):\n"
+            "• Memeriksa apakah Channel ID terdaftar di file `.env`.\n"
             "• Memverifikasi apakah toggle **Age-Restricted (NSFW)** sudah aktif."
         ),
         inline=False
@@ -1403,9 +1805,9 @@ def build_help_kamus_embed() -> discord.Embed:
 
 def build_help_saluran_embed() -> discord.Embed:
     embed = discord.Embed(
-        title="🌐 Sistem 3 Saluran Kategori Video",
+        title="🌐 Sistem 4 Saluran Kategori Video & Anime",
         description=(
-            "Bot Sugiono bekerja secara otomatis memilah dan mengirimkan feed video dewasa ke **3 channel terpisah** setiap 30 menit:\n"
+            "Bot Sugiono bekerja secara otomatis memilah dan mengirimkan feed video dewasa & anime ke **4 channel terpisah** setiap 30 menit:\n"
             "────────────────────────────────────────"
         ),
         color=discord.Color.from_rgb(30, 144, 255),
@@ -1416,12 +1818,20 @@ def build_help_saluran_embed() -> discord.Embed:
         ch_id = cat["channel_id"]
         ch_obj = bot.get_channel(ch_id) if ch_id else None
         status = f"Terhubung ke #{ch_obj.name}" if ch_obj else f"ID: `{ch_id or 'Belum diatur'}`"
+        
+        if cat_key == "hentai":
+            source_desc = "Nekopoi.care (Anime Hentai & Manga/3D)"
+        elif cat_key == "jepang":
+            source_desc = "XVideos & Roshy.tv (Decensored JAV Subtitle)"
+        else:
+            source_desc = "XVideos & Eporner Engine"
+
         embed.add_field(
             name=f"{cat['emoji']} {cat['name']}",
             value=(
                 f"• Saluran: **{status}**\n"
-                f"• Auto-Update: **Maksimal 3 video baru per 30 menit**\n"
-                f"• Sumber Feed: **XVideos Scraper Engine**"
+                f"• Auto-Update: **Maksimal 3 konten baru per 30 menit**\n"
+                f"• Sumber Feed: **{source_desc}**"
             ),
             inline=False
         )
@@ -1453,7 +1863,7 @@ def build_help_keamanan_embed() -> discord.Embed:
     embed.add_field(
         name="⚙️ Cara Mengaktifkan Status NSFW di Discord:",
         value=(
-            "1. Klik kanan nama channel yang dituju (misal: `#jav`).\n"
+            "1. Klik kanan nama channel yang dituju (misal: `#jav` atau `#hentai`).\n"
             "2. Pilih **Edit Channel** (Ikon Gerigi).\n"
             "3. Buka tab **Overview** lalu scroll ke bawah.\n"
             "4. Nyalakan toggle **Age-Restricted Channel (NSFW)**.\n"
@@ -1494,9 +1904,9 @@ class HelpDropdown(discord.ui.Select):
                 value="kamus"
             ),
             discord.SelectOption(
-                label="3 Saluran Kategori",
+                label="4 Saluran Kategori",
                 emoji="🌐",
-                description="Info channel Jepang, Asia, dan Western",
+                description="Info channel Jepang, Hentai, Asia, dan Western",
                 value="saluran"
             ),
             discord.SelectOption(
