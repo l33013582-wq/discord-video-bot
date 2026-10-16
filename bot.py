@@ -164,6 +164,9 @@ class VideoHistoryManager:
                 slug = re.sub(r'[^a-zA-Z0-9]', '', str(v_title).lower())
                 if len(slug) >= 8:
                     keys.append(f"slug:{slug[:40]}")
+                code = detect_jav_code(str(v_title))
+                if code:
+                    keys.append(f"code:{code.upper()}")
         elif isinstance(video, str) and video.strip():
             clean_str = video.strip()
             keys.append(clean_str)
@@ -1632,7 +1635,7 @@ async def cari_video(
             except Exception as p1_err:
                 logger.info(f"Pencarian XVideos p=1 gagal/timeout: {p1_err}")
 
-        # Tentukan kandidat video yang akan dikirim (ambil beberapa kandidat segar untuk verifikasi playability)
+        # Tentukan kandidat video yang akan dikirim (prioritaskan video segar yang belum pernah di-drop)
         if fresh_results:
             candidates = fresh_results[:6]
         elif detected_code:
